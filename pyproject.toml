@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "realhands"
+version = "0.1.0"
+description = "Give your AI agent a real, logged-in browser."
+license = "Apache-2.0"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+bridge = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "httpx",
+    "cryptography",
+    "keyring",
+]
+vision = [
+    "litellm",
+    "pydantic",
+    "pillow",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.setuptools]
+# The only pip-importable Python package is the vision library (vision/vision).
+# The bridge runs via `uvicorn bridge:app` from bridge/, not as an installed package.
+package-dir = { "" = "vision" }
+packages = ["vision"]

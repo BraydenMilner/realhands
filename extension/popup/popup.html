@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>realhands</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>realhands</h1>
+      <span id="version" class="version"></span>
+    </header>
+
+    <section class="row">
+      <span class="label">Bridge</span>
+      <span id="connection-pill" class="pill pill-idle">idle</span>
+    </section>
+
+    <section class="row">
+      <span class="label">URL</span>
+      <input id="bridge-url" type="text" spellcheck="false" placeholder="ws://localhost:7878" />
+    </section>
+
+    <section class="row">
+      <span class="label">Token</span>
+      <input id="bridge-token" type="password" spellcheck="false" autocomplete="off" placeholder="optional" />
+    </section>
+
+    <section class="row">
+      <span class="label">Browser ID</span>
+      <input id="browser-id" type="text" spellcheck="false" placeholder="default" />
+    </section>
+
+    <section class="row">
+      <span class="label">Task</span>
+      <span id="current-task" class="value">none</span>
+    </section>
+
+    <section class="row">
+      <span class="label">Last event</span>
+      <span id="last-event" class="value">—</span>
+    </section>
+
+    <footer>
+      <button id="reconnect" type="button">Reconnect</button>
+      <button id="save-url" type="button">Save URL</button>
+      <button id="save-token" type="button">Save Token</button>
+      <button id="save-id" type="button">Save ID</button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

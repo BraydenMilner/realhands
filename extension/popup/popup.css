@@ -1,0 +1,138 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  margin: 0;
+  padding: 14px 16px 12px;
+  width: 360px;
+  background: #fafafa;
+  color: #1f2328;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+h1 {
+  font-size: 14px;
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.version {
+  color: #8b939c;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+section.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 7px 0;
+}
+
+.label {
+  color: #6b7378;
+  min-width: 78px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.value {
+  color: #1f2328;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid #d0d5db;
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: #fff;
+  color: #1f2328;
+}
+
+input:focus {
+  outline: none;
+  border-color: #4c8bf5;
+  box-shadow: 0 0 0 2px rgba(76, 139, 245, 0.2);
+}
+
+.pill {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.pill-idle {
+  background: #e8eaed;
+  color: #5f6368;
+}
+
+.pill-connecting {
+  background: #fff3cd;
+  color: #8a6d3b;
+}
+
+.pill-connected {
+  background: #d4f0dd;
+  color: #1a7a3a;
+}
+
+.pill-disconnected {
+  background: #fbe1e1;
+  color: #8a1f1f;
+}
+
+footer {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+button {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #d0d5db;
+  border-radius: 5px;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  color: #1f2328;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #f2f4f7;
+}
+
+button:active:not(:disabled) {
+  background: #e8ebef;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

@@ -1,0 +1,23 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+node_modules/
+*.crx
+*.pem
+*.log
+.env
+.env.local
+vault.db
+vault.db-*
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local-only working docs — never publish (contains private context)
+AUDIT-FIXES.md
