@@ -224,7 +224,7 @@ def _init_state(app: FastAPI) -> None:
                 "XAUTHORITY", str(Path.home() / ".Xauthority")
             )
             app.state.spawner = SwarmSpawner(
-                chrome_bin=os.environ.get("CHROME_BIN", "google-chrome"),
+                chrome_bin=os.environ.get("CHROME_BIN") or None,
                 profiles_dir=profiles_dir,
                 bridge_port=int(os.environ.get("BRIDGE_PORT", "7878")),
                 display=os.environ.get("DISPLAY", ":10"),

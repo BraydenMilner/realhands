@@ -1,21 +1,26 @@
 """SwarmSpawner — launches/kills headed Chrome profiles on demand.
 
 Layer-2 process manager for the realhands swarm. Runs on the machine where the
-bridge runs (a host with a graphical display / X server). Each spawned Chrome is a headed
-browser pointed at the bridge's /register?browser_id=<ID> URL so the ONE
-extension (force-installed via Chrome policy) learns its browser_id from the
-tab URL via the service worker's tabs.onUpdated handler — no content script
-needed on http://localhost.
+bridge runs. Each spawned Chrome is a headed browser pointed at the bridge's
+/register?browser_id=<ID> URL so the ONE extension (force-installed via Chrome
+policy) learns its browser_id from the tab URL via the service worker's
+tabs.onUpdated handler — no content script needed on http://localhost.
+
+Cross-platform: supports Linux (X11), macOS (native desktop), and Windows.
+Chrome binary is auto-detected per OS (overridable via CHROME_BIN env).
+DISPLAY/XAUTHORITY are only set on Linux. Process management uses POSIX
+start_new_session+killpg on Linux/macOS and CREATE_NEW_PROCESS_GROUP+
+taskkill on Windows.
 
 Design notes (honoring SWARM PROTOCOL v1):
-- Chrome is launched DETACHED (start_new_session=True / setsid) so the bridge
-  process does not own it and a bridge restart never kills the swarm.
+- Chrome is launched DETACHED so the bridge process does not own it and a bridge
+  restart never kills the swarm.
 - The launch URL carries the id; the SW persists it to realhands_state.browser_id
   and (re)registers under <ID>.
 - persistent=False -> ephemeral profile dir under the system temp area, removed
   on close. persistent=True -> a named reusable profile under profiles_dir kept
   on disk so logged-in sessions (cookies) survive close -> reopen.
-- close() kills the whole process GROUP (os.killpg) because Chrome forks helper
+- close() kills the whole process GROUP/TREE because Chrome forks helper
   processes; killing only the launcher pid would orphan them.
 - NO network calls are made here; this is pure process management.
 
@@ -26,10 +31,12 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -38,19 +45,12 @@ from typing import Optional
 
 log = logging.getLogger("agent_bridge.spawn")
 
-# Flags pinned by the SWARM PROTOCOL. --silent-debugger-extension-api keeps the
-# CDP/debugger banner from appearing (the executor drives input via the debugger
-# extension API for isTrusted=true). --no-first-run / --no-default-browser-check
-# stop fresh profiles from showing onboarding chrome that would steal focus from
-# the /register tab.
 _CHROME_FLAGS = (
     "--silent-debugger-extension-api",
     "--no-first-run",
     "--no-default-browser-check",
 )
 
-# Prefix for ephemeral profile dirs so they're recognizable in the temp area and
-# safe to rmtree (we only ever remove dirs we created with this prefix).
 _EPHEMERAL_PREFIX = "realhands-swarm-"
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
@@ -80,30 +80,123 @@ def _default_xauthority() -> str:
     return str(Path.home() / ".Xauthority")
 
 
+def _current_os() -> str:
+    return platform.system()
+
+
+def _windows_program_dirs() -> list[str]:
+    return [
+        os.environ.get("ProgramFiles", ""),
+        os.environ.get("ProgramFiles(x86)", ""),
+        os.environ.get("LocalAppData", ""),
+    ]
+
+
+def _find_chrome_binary() -> str:
+    env_bin = os.environ.get("CHROME_BIN")
+    if env_bin:
+        return env_bin
+
+    os_name = _current_os()
+
+    if os_name == "Linux":
+        candidates = [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ]
+        for name in candidates:
+            found = shutil.which(name)
+            if found:
+                return found
+    elif os_name == "Darwin":
+        mac_path = (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )
+        if Path(mac_path).exists():
+            return mac_path
+    elif os_name == "Windows":
+        for base in _windows_program_dirs():
+            if not base:
+                continue
+            candidate = Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"
+            if candidate.exists():
+                return str(candidate)
+
+    raise RuntimeError(
+        "Chrome binary not found. Install Google Chrome or set CHROME_BIN "
+        "to the full path of the Chrome executable."
+    )
+
+
+def _kill_process_tree(pid: int) -> None:
+    os_name = _current_os()
+    if os_name == "Windows":
+        _kill_process_tree_windows(pid)
+    else:
+        _kill_process_tree_posix(pid)
+
+
+def _kill_process_tree_posix(pid: int) -> None:
+    if pid is None or pid <= 0:
+        return
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    except OSError:
+        pgid = pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        log.warning("no permission to kill process group %s", pgid)
+    except OSError as exc:
+        log.warning("killpg(%s) failed: %s", pgid, exc)
+
+
+def _kill_process_tree_windows(pid: int) -> None:
+    if pid is None or pid <= 0:
+        return
+    try:
+        subprocess.call(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    except Exception as exc:
+        log.warning("taskkill failed for pid %s: %s", pid, exc)
+
+
 class SwarmSpawner:
     """Launch/kill headed Chrome profiles on demand for the bridge swarm."""
 
     def __init__(
         self,
-        chrome_bin: str = "google-chrome",
+        chrome_bin: Optional[str] = None,
         profiles_dir: Optional[str] = None,
         bridge_port: int = 7878,
         display: str = ":10",
         xauthority: Optional[str] = None,
     ) -> None:
-        self.chrome_bin = chrome_bin
+        if chrome_bin is not None:
+            self.chrome_bin = chrome_bin
+        else:
+            self.chrome_bin = _find_chrome_binary()
         self.profiles_dir = Path(profiles_dir) if profiles_dir else _default_profiles_dir()
         self.bridge_port = int(bridge_port)
         self.display = display
         self.xauthority = xauthority if xauthority is not None else _default_xauthority()
-        # browser_id -> {pid, profile_dir, persistent, profile, popen, log_file}
         self._browsers: dict[str, dict] = {}
-        # Ensure the profiles root exists (best-effort, but a hard failure here
-        # means we can't write persistent profiles or logs, so let it raise).
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self.profiles_dir = self.profiles_dir.resolve()
-
-    # ---------- argv construction ----------
 
     def _register_url(self, browser_id: str) -> str:
         return (
@@ -117,20 +210,33 @@ class SwarmSpawner:
             f"--user-data-dir={user_data_dir}",
         ]
         argv.extend(_CHROME_FLAGS)
-        # The register URL MUST be the launch URL — it carries the id for the SW.
         argv.append(self._register_url(browser_id))
         return argv
 
-    # ---------- env ----------
-
     def _launch_env(self) -> dict:
         env = dict(os.environ)
-        env["DISPLAY"] = self.display
-        if self.xauthority:
-            env["XAUTHORITY"] = self.xauthority
+        if _current_os() == "Linux":
+            env["DISPLAY"] = self.display
+            if self.xauthority:
+                env["XAUTHORITY"] = self.xauthority
         return env
 
-    # ---------- spawn ----------
+    def _popen_kwargs(self) -> dict:
+        os_name = _current_os()
+        kwargs: dict = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "stdin": subprocess.DEVNULL,
+            "env": self._launch_env(),
+        }
+        if os_name == "Windows":
+            kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+            )
+        else:
+            kwargs["start_new_session"] = True
+            kwargs["close_fds"] = True
+        return kwargs
 
     async def spawn(
         self,
@@ -139,17 +245,6 @@ class SwarmSpawner:
         persistent: bool = False,
         start_url: Optional[str] = None,
     ) -> dict:
-        """Launch a headed Chrome for `browser_id`.
-
-        Returns {"browser_id", "pid"}. Raises RuntimeError on launch failure.
-
-        - user-data-dir = profiles_dir/<profile or browser_id> for persistent,
-          else an ephemeral temp dir tracked for cleanup.
-        - launch URL = http://localhost:<bridge_port>/register?browser_id=<id>.
-        - start_url is accepted for forward-compat (the SW can navigate there
-          after registering); for v1 registering is enough, so it's not added to
-          the argv here.
-        """
         if browser_id is None:
             browser_id = self._gen_id()
         browser_id = _validate_safe_name(str(browser_id), "browser_id")
@@ -159,7 +254,6 @@ class SwarmSpawner:
         if browser_id in self._browsers and self._is_alive(self._browsers[browser_id]["pid"]):
             raise RuntimeError(f"browser_id {browser_id!r} already running")
 
-        # Resolve the user-data-dir.
         if persistent:
             name = profile or browser_id
             profile_path = (self.profiles_dir / name).resolve()
@@ -168,38 +262,28 @@ class SwarmSpawner:
             profile_path.mkdir(parents=True, exist_ok=True)
             profile_dir = str(profile_path)
         else:
-            # Ephemeral: a fresh temp dir we own and will rmtree on close. If a
-            # `profile` name was given alongside persistent=False we still use an
-            # ephemeral dir (non-persistent never survives), but the requested
-            # name is recorded for visibility.
             profile_dir = tempfile.mkdtemp(prefix=_EPHEMERAL_PREFIX)
 
         argv = self._build_argv(profile_dir, browser_id)
 
-        # Per-browser log under profiles_dir so stdout/stderr don't pollute the
-        # bridge's own streams and a crash can be inspected post-mortem.
         log_path = self.profiles_dir / f"{browser_id}.log"
         try:
             log_file = open(log_path, "ab", buffering=0)
         except OSError as exc:
-            # Couldn't open the log — clean up an ephemeral dir we just made.
             if not persistent:
                 shutil.rmtree(profile_dir, ignore_errors=True)
             raise RuntimeError(
                 f"failed to open spawn log {log_path}: {exc}"
             ) from exc
 
+        popen_kwargs = self._popen_kwargs()
+        popen_kwargs["stdout"] = log_file
+        popen_kwargs["stderr"] = subprocess.STDOUT
+
         try:
-            proc = subprocess.Popen(  # noqa: S603 - argv is built from config, not user shell input
+            proc = subprocess.Popen(  # noqa: S603
                 argv,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                env=self._launch_env(),
-                # DETACHED: new session/process group so the bridge doesn't own
-                # Chrome and we can killpg the whole tree on close.
-                start_new_session=True,
-                close_fds=True,
+                **popen_kwargs,
             )
         except (OSError, ValueError) as exc:
             log_file.close()
@@ -229,23 +313,15 @@ class SwarmSpawner:
         )
         return {"browser_id": browser_id, "pid": proc.pid}
 
-    # ---------- close ----------
-
     async def close(self, browser_id: str) -> bool:
-        """Kill the process GROUP for `browser_id` and untrack it.
-
-        For non-persistent browsers, also remove the ephemeral profile dir.
-        Returns True if the browser_id was tracked, False otherwise.
-        """
         browser_id = str(browser_id)
         info = self._browsers.pop(browser_id, None)
         if info is None:
             return False
 
         pid = info["pid"]
-        self._killpg(pid)
+        _kill_process_tree(pid)
 
-        # Close the log fd we held open.
         log_file = info.get("log_file")
         if log_file is not None:
             try:
@@ -253,19 +329,13 @@ class SwarmSpawner:
             except Exception:
                 pass
 
-        # Remove the ephemeral profile dir; never delete a persistent one.
         if not info["persistent"]:
             shutil.rmtree(info["profile_dir"], ignore_errors=True)
 
         log.info("closed browser_id=%s pid=%s", browser_id, pid)
         return True
 
-    # ---------- list ----------
-
     def list(self) -> list:
-        """Return [{browser_id, pid, profile, persistent, alive}] for all tracked
-        browsers. `alive` reflects whether the process is still running.
-        """
         out: list[dict] = []
         for browser_id, info in self._browsers.items():
             out.append(
@@ -279,21 +349,12 @@ class SwarmSpawner:
             )
         return out
 
-    # ---------- helpers ----------
-
     @staticmethod
     def _gen_id() -> str:
-        # Short uuid-based id — enough entropy to avoid collisions in a swarm,
-        # short enough to be readable in logs and URLs.
         return "b-" + uuid.uuid4().hex[:8]
 
     @staticmethod
     def _is_alive(pid: int) -> bool:
-        """True if a process with `pid` is still running.
-
-        Uses os.kill(pid, 0): raises ProcessLookupError if gone, PermissionError
-        if it exists but we can't signal it (still 'alive').
-        """
         if pid is None or pid <= 0:
             return False
         try:
@@ -308,25 +369,4 @@ class SwarmSpawner:
 
     @staticmethod
     def _killpg(pid: int) -> None:
-        """Best-effort kill of the whole process group led by `pid`.
-
-        Chrome spawns helper processes in the same session/group (we launched it
-        with start_new_session=True), so SIGTERM to the group reaps the tree.
-        Swallow ProcessLookupError (already dead) and PermissionError.
-        """
-        if pid is None or pid <= 0:
-            return
-        try:
-            pgid = os.getpgid(pid)
-        except ProcessLookupError:
-            return
-        except OSError:
-            pgid = pid
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        except PermissionError:
-            log.warning("no permission to kill process group %s", pgid)
-        except OSError as exc:
-            log.warning("killpg(%s) failed: %s", pgid, exc)
+        _kill_process_tree(pid)

@@ -3,7 +3,7 @@
 These tests NEVER launch a real Chrome and NEVER signal a real process. We
 monkeypatch:
   - subprocess.Popen      -> a fake that records argv/env/kwargs and returns a
-                             fake pid.
+                              fake pid.
   - os.killpg / os.getpgid -> recorders (so close() doesn't touch a real PID).
   - os.kill (signal 0)    -> a controllable liveness oracle for list()/alive.
 
@@ -11,13 +11,14 @@ Covered:
   - spawn() builds the correct argv: --user-data-dir, the
     /register?browser_id=<id> launch URL, and the three pinned flags.
   - spawn() launches DETACHED (start_new_session=True) with DISPLAY/XAUTHORITY
-    in the env.
+    in the env on Linux.
   - spawn() tracks the browser; list() reflects it with alive=True.
   - close() kills the process group (os.killpg) and untracks.
   - a non-persistent (ephemeral) profile dir is created on spawn and removed on
     close; a persistent profile dir is created and KEPT after close.
   - spawn() auto-generates a browser_id when none is given.
   - list() alive reflects a dead process.
+  - Cross-platform: per-OS Chrome binary detection, env vars, and kill strategy.
 
 Run from this directory:
     ./.venv/bin/python -m pytest test_spawn_manager.py -q
@@ -27,11 +28,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 import spawn_manager
-from spawn_manager import SwarmSpawner
+from spawn_manager import SwarmSpawner, _kill_process_tree
 
 
 # ---------- fakes ----------
@@ -51,8 +53,6 @@ class FakePopen:
         FakePopen.next_pid += 1
         FakePopen.instances.append(self)
 
-    # Spawner never calls these on the happy path, but define them so any
-    # incidental use is harmless.
     def poll(self):
         return None
 
@@ -65,21 +65,29 @@ class KillRecorder:
 
     def __init__(self):
         self.killpg_calls: list[tuple[int, int]] = []
-        # pids considered alive for os.kill(pid, 0). Default: everything alive.
         self.dead_pids: set[int] = set()
 
     def getpgid(self, pid):
-        # In tests the "group id" is just the pid.
         return pid
 
     def killpg(self, pgid, sig):
         self.killpg_calls.append((pgid, sig))
 
     def kill(self, pid, sig):
-        # Emulate os.kill(pid, 0) liveness probe.
         if pid in self.dead_pids:
             raise ProcessLookupError(pid)
         return None
+
+
+class TaskkillRecorder:
+    """Records taskkill subprocess calls on Windows."""
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+        return type("R", (), {"returncode": 0})()
 
 
 # ---------- fixtures ----------
@@ -125,32 +133,26 @@ async def test_spawn_builds_correct_argv(spawner, fake_popen):
     assert len(fake_popen.instances) == 1
     argv = fake_popen.instances[0].argv
 
-    # chrome binary first.
     assert argv[0] == "/opt/chrome/chrome"
 
-    # user-data-dir points at profiles_dir/<browser_id> for a persistent spawn.
     expected_udd = str(spawner.profiles_dir / "alpha")
     assert f"--user-data-dir={expected_udd}" in argv
 
-    # the three pinned flags are present.
     assert "--silent-debugger-extension-api" in argv
     assert "--no-first-run" in argv
     assert "--no-default-browser-check" in argv
 
-    # the launch URL is the /register?browser_id= URL on the bridge port, and it
-    # is the LAST arg (Chrome treats the trailing positional as the URL to open).
     assert argv[-1] == "http://localhost:7878/register?browser_id=alpha"
 
 
 @pytest.mark.asyncio
-async def test_spawn_launches_detached_with_display_env(spawner, fake_popen):
+async def test_spawn_launches_detached_with_display_env(monkeypatch, spawner, fake_popen):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
     await spawner.spawn(browser_id="beta", persistent=True)
     inst = fake_popen.instances[0]
 
-    # Detached: new session so the bridge does not own Chrome.
     assert inst.kwargs.get("start_new_session") is True
 
-    # DISPLAY + XAUTHORITY are injected into the child env.
     assert inst.env is not None
     assert inst.env["DISPLAY"] == ":10"
     assert inst.env["XAUTHORITY"] == "/home/realhands/.Xauthority"
@@ -159,10 +161,8 @@ async def test_spawn_launches_detached_with_display_env(spawner, fake_popen):
 @pytest.mark.asyncio
 async def test_spawn_writes_per_browser_log(spawner, fake_popen):
     await spawner.spawn(browser_id="gamma", persistent=True)
-    # The log file is created under profiles_dir as <browser_id>.log.
     log_path = spawner.profiles_dir / "gamma.log"
     assert log_path.exists()
-    # And it's wired into Popen's stdout.
     inst = fake_popen.instances[0]
     assert inst.kwargs.get("stdout") is not None
 
@@ -196,7 +196,6 @@ async def test_spawn_autogenerates_browser_id(spawner):
     res = await spawner.spawn(browser_id=None, persistent=True)
     bid = res["browser_id"]
     assert isinstance(bid, str) and bid
-    # tracked under the generated id.
     assert spawner.list()[0]["browser_id"] == bid
 
 
@@ -240,10 +239,8 @@ async def test_close_killpgs_and_untracks(spawner, kill_recorder):
     ok = await spawner.close("alpha")
     assert ok is True
 
-    # process group was killed (group id == pid in the recorder).
     assert any(call[0] == pid for call in kill_recorder.killpg_calls)
 
-    # untracked.
     assert spawner.list() == []
 
 
@@ -258,16 +255,13 @@ async def test_close_unknown_returns_false(spawner):
 @pytest.mark.asyncio
 async def test_ephemeral_profile_dir_created_then_removed(spawner):
     res = await spawner.spawn(browser_id="ephem", persistent=False)
-    # find the tracked profile dir via list -> not exposed, so reach into state.
     info = spawner._browsers["ephem"]
     profile_dir = Path(info["profile_dir"])
 
-    # ephemeral dir was created (mkdtemp) and lives outside profiles_dir.
     assert profile_dir.exists()
     assert info["persistent"] is False
 
     await spawner.close("ephem")
-    # removed on close.
     assert not profile_dir.exists()
 
 
@@ -278,7 +272,6 @@ async def test_persistent_profile_dir_kept_after_close(spawner):
     assert profile_dir.exists()
 
     await spawner.close("keepme")
-    # persistent profile survives close so cookies/sessions persist.
     assert profile_dir.exists()
 
 
@@ -307,7 +300,6 @@ async def test_spawn_launch_failure_raises_clear_error(tmp_path, monkeypatch, ki
     with pytest.raises(RuntimeError) as ei:
         await sp.spawn(browser_id="x", persistent=False)
     assert "failed to launch chrome" in str(ei.value)
-    # nothing tracked after a failed launch.
     assert sp.list() == []
 
 
@@ -332,7 +324,6 @@ async def test_spawn_launch_failure_cleans_ephemeral_dir(tmp_path, monkeypatch, 
     with pytest.raises(RuntimeError):
         await sp.spawn(browser_id="x", persistent=False)
 
-    # the ephemeral dir created before the failed launch was cleaned up.
     assert "dir" in created
     assert not os.path.exists(created["dir"])
 
@@ -348,14 +339,255 @@ def test_init_creates_profiles_dir(tmp_path):
 
 
 def test_init_defaults_match_pins():
-    sp = SwarmSpawner.__new__(SwarmSpawner)
-    # don't run __init__ (would mkdir under HOME); just check default constants.
-    # Verify the default signature values via a real construct under tmp HOME is
-    # overkill; assert the documented defaults on a freshly built instance with
-    # an explicit profiles_dir so we don't touch ~/.config.
     import inspect
 
     sig = inspect.signature(SwarmSpawner.__init__)
-    assert sig.parameters["chrome_bin"].default == "google-chrome"
+    assert sig.parameters["chrome_bin"].default is None
     assert sig.parameters["bridge_port"].default == 7878
     assert sig.parameters["display"].default == ":10"
+
+
+# ============================================================
+# Cross-platform tests
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_linux_sets_display_env(monkeypatch, fake_popen, tmp_path):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+    monkeypatch.setattr(spawn_manager, "_find_chrome_binary", lambda: "/usr/bin/google-chrome")
+
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    await sp.spawn(browser_id="linux1", persistent=True)
+    inst = fake_popen.instances[-1]
+    assert inst.env["DISPLAY"] == ":10"
+    assert "XAUTHORITY" in inst.env
+    assert inst.kwargs.get("start_new_session") is True
+
+
+@pytest.mark.asyncio
+async def test_macos_no_display_env(monkeypatch, fake_popen, tmp_path):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Darwin")
+    monkeypatch.setattr(
+        spawn_manager,
+        "_find_chrome_binary",
+        lambda: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    )
+
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    await sp.spawn(browser_id="mac1", persistent=True)
+    inst = fake_popen.instances[-1]
+    assert "DISPLAY" not in inst.env
+    assert "XAUTHORITY" not in inst.env
+    assert inst.kwargs.get("start_new_session") is True
+
+
+@pytest.mark.asyncio
+async def test_windows_no_display_env(monkeypatch, fake_popen, tmp_path):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Windows")
+    monkeypatch.setattr(
+        spawn_manager,
+        "_find_chrome_binary",
+        lambda: r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    )
+
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    await sp.spawn(browser_id="win1", persistent=True)
+    inst = fake_popen.instances[-1]
+    assert "DISPLAY" not in inst.env
+    assert "XAUTHORITY" not in inst.env
+    flags = inst.kwargs.get("creationflags", 0)
+    assert flags != 0
+    assert "start_new_session" not in inst.kwargs
+
+
+def test_find_chrome_linux(monkeypatch):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+    monkeypatch.setattr(spawn_manager.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "google-chrome" else None)
+
+    result = spawn_manager._find_chrome_binary()
+    assert result == "/usr/bin/google-chrome"
+
+
+def test_find_chrome_linux_chromium_fallback(monkeypatch):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+
+    def fake_which(name):
+        if name == "google-chrome":
+            return None
+        if name == "google-chrome-stable":
+            return None
+        if name == "chromium":
+            return "/usr/bin/chromium"
+        return None
+
+    monkeypatch.setattr(spawn_manager.shutil, "which", fake_which)
+    result = spawn_manager._find_chrome_binary()
+    assert result == "/usr/bin/chromium"
+
+
+def test_find_chrome_macos(monkeypatch, tmp_path):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Darwin")
+    mac_path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+
+    exists_map = {str(mac_path): True}
+
+    original_exists = Path.exists
+
+    def patched_exists(self):
+        return exists_map.get(str(self), original_exists(self))
+
+    monkeypatch.setattr(Path, "exists", patched_exists)
+
+    result = spawn_manager._find_chrome_binary()
+    assert result == str(mac_path)
+
+
+def test_find_chrome_windows(monkeypatch):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Windows")
+    monkeypatch.delenv("CHROME_BIN", raising=False)
+
+    expected_str = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+    expected = Path(expected_str)
+    exists_map = {str(expected): True, expected_str: True}
+    original_exists = Path.exists
+
+    def patched_exists(self):
+        return exists_map.get(str(self), original_exists(self))
+
+    monkeypatch.setattr(Path, "exists", patched_exists)
+    monkeypatch.setattr(
+        spawn_manager,
+        "_windows_program_dirs",
+        lambda: ["C:/Program Files", "C:/Program Files (x86)", "C:/Users/test/AppData/Local"],
+    )
+
+    result = spawn_manager._find_chrome_binary()
+    assert "chrome.exe" in result
+
+
+def test_find_chrome_env_override(monkeypatch):
+    monkeypatch.setattr(os.environ, "get", lambda k, d=None: "/my/custom/chrome" if k == "CHROME_BIN" else d)
+    result = spawn_manager._find_chrome_binary()
+    assert result == "/my/custom/chrome"
+
+
+def test_find_chrome_not_found_raises(monkeypatch):
+    monkeypatch.delenv("CHROME_BIN", raising=False)
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+    monkeypatch.setattr(spawn_manager.shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="Chrome binary not found"):
+        spawn_manager._find_chrome_binary()
+
+
+def test_kill_tree_posix_uses_killpg(monkeypatch):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+    killpg_calls = []
+
+    def fake_getpgid(pid):
+        return pid
+
+    def fake_killpg(pgid, sig):
+        killpg_calls.append((pgid, sig))
+
+    monkeypatch.setattr(spawn_manager.os, "getpgid", fake_getpgid)
+    monkeypatch.setattr(spawn_manager.os, "killpg", fake_killpg)
+
+    _kill_process_tree(999)
+    assert killpg_calls == [(999, spawn_manager.signal.SIGTERM)]
+
+
+def test_kill_tree_posix_dead_process(monkeypatch):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+
+    def fake_getpgid(pid):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(spawn_manager.os, "getpgid", fake_getpgid)
+    _kill_process_tree(999)
+
+
+def test_kill_tree_windows_uses_taskkill(monkeypatch):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Windows")
+    recorder = TaskkillRecorder()
+    monkeypatch.setattr(spawn_manager.subprocess, "call", recorder)
+
+    _kill_process_tree(888)
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0] == ["taskkill", "/F", "/T", "/PID", "888"]
+
+
+def test_kill_tree_windows_dead_process(monkeypatch):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Windows")
+
+    def boom(*a, **k):
+        raise FileNotFoundError("no taskkill")
+
+    monkeypatch.setattr(spawn_manager.subprocess, "call", boom)
+
+    kill_calls = []
+    monkeypatch.setattr(spawn_manager.os, "kill", lambda pid, sig: kill_calls.append((pid, sig)))
+
+    _kill_process_tree(777)
+    assert kill_calls == [(777, spawn_manager.signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
+async def test_close_uses_kill_tree_on_linux(monkeypatch, fake_popen, tmp_path):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+    monkeypatch.setattr(spawn_manager, "_find_chrome_binary", lambda: "/usr/bin/chrome")
+
+    killpg_calls = []
+
+    def fake_getpgid(pid):
+        return pid
+
+    def fake_killpg(pgid, sig):
+        killpg_calls.append((pgid, sig))
+
+    monkeypatch.setattr(spawn_manager.os, "getpgid", fake_getpgid)
+    monkeypatch.setattr(spawn_manager.os, "killpg", fake_killpg)
+    monkeypatch.setattr(spawn_manager.os, "kill", lambda pid, sig: None)
+
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    await sp.spawn(browser_id="lx", persistent=True)
+    await sp.close("lx")
+    assert len(killpg_calls) == 1
+    assert killpg_calls[0][0] == 4242
+
+
+@pytest.mark.asyncio
+async def test_close_uses_taskkill_on_windows(monkeypatch, fake_popen, tmp_path):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Windows")
+    monkeypatch.setattr(
+        spawn_manager,
+        "_find_chrome_binary",
+        lambda: r"C:\chrome\chrome.exe",
+    )
+
+    taskkill_recorder = TaskkillRecorder()
+    monkeypatch.setattr(spawn_manager.subprocess, "call", taskkill_recorder)
+    monkeypatch.setattr(spawn_manager.os, "kill", lambda pid, sig: None)
+
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    await sp.spawn(browser_id="wn", persistent=True)
+    await sp.close("wn")
+    assert len(taskkill_recorder.calls) == 1
+    assert "888" in taskkill_recorder.calls[0] or "4242" in taskkill_recorder.calls[0]
+
+
+def test_chrome_bin_none_uses_finder(monkeypatch, tmp_path):
+    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
+    monkeypatch.setattr(spawn_manager.shutil, "which", lambda n: "/usr/bin/google-chrome" if n == "google-chrome" else None)
+
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    assert sp.chrome_bin == "/usr/bin/google-chrome"
+
+
+def test_chrome_bin_explicit_skips_finder(tmp_path):
+    sp = SwarmSpawner(
+        chrome_bin="/custom/chrome",
+        profiles_dir=str(tmp_path / "profiles"),
+    )
+    assert sp.chrome_bin == "/custom/chrome"

@@ -94,3 +94,26 @@ bring your own agent (mode A), you don't need this layer at all.
   localhost-only without auth for compatibility, with a startup warning.
 - **Fail loud.** Connection loss, repeated failures, and guard trips are surfaced, not
   swallowed.
+
+## Cross-platform support
+
+The bridge's multiplexed driving (executor registry, `/call` routing, `/close`)
+is pure cross-platform Python and works on Linux, macOS, and Windows.
+
+Auto-spawn (`POST /spawn`) launches a headed Chrome with a fresh profile that
+self-registers via `/register?browser_id=...`. This is cross-platform:
+
+- **Chrome binary** is auto-detected per OS (or overridden with `CHROME_BIN`).
+- **DISPLAY / XAUTHORITY** are only set on Linux; macOS and Windows use the native
+  desktop.
+- **Process management** uses `start_new_session` + `killpg` on POSIX and
+  `CREATE_NEW_PROCESS_GROUP` + `taskkill /F /T /PID` on Windows.
+
+**Extension provisioning** is the cross-platform gap: modern Chrome blocks
+`--load-extension` on fresh profiles, so the `/spawn` flow requires a managed-policy
+`ExtensionInstallForcelist` installed once with admin/sudo. The `policy_setup.py`
+CLI handles this per OS. Linux and macOS are supported; Windows is implemented but
+unverified. See [docs/PLATFORMS.md](PLATFORMS.md) for details.
+
+A no-admin fallback exists: load the unpacked extension manually in Developer mode
+and use a persistent profile (single or manual multi-browser).

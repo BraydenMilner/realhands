@@ -27,7 +27,9 @@ flag (which modern Chrome blocks on the default profile anyway).
   orchestrator — over a tiny local REST/WebSocket API. Or use the bundled
   bring-your-own-key loop.
 - **Swarm.** Spawn, drive, and close many browsers on demand, each addressed by a
-  `browser_id`.
+  `browser_id`. Auto-spawn works on Linux + macOS (Windows: implemented but
+  unverified); requires a one-time admin policy step. See
+  [docs/PLATFORMS.md](docs/PLATFORMS.md).
 - **Safe by default.** A built-in guard **refuses** clicks/keys on money-moving
   controls (deposit / withdraw / transfer / cashout / cashier / …) by default;
   it fails closed when it can't verify a target. (Disabling it requires editing
