@@ -1,7 +1,7 @@
 """SwarmSpawner — launches/kills headed Chrome profiles on demand.
 
 Layer-2 process manager for the realhands swarm. Runs on the machine where the
-bridge runs (the VPS with the X display). Each spawned Chrome is a headed
+bridge runs (a host with a graphical display / X server). Each spawned Chrome is a headed
 browser pointed at the bridge's /register?browser_id=<ID> URL so the ONE
 extension (force-installed via Chrome policy) learns its browser_id from the
 tab URL via the service worker's tabs.onUpdated handler — no content script

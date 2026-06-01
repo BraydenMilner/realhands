@@ -139,7 +139,7 @@ except ImportError:  # vault.py not written yet — keep bridge importable.
 
 # ---------- spawn manager import (sibling file, may not exist yet) ----------
 # SwarmSpawner manages Chrome processes on the machine where the bridge runs
-# (the VPS with the X display). If spawn_manager.py isn't present, keep the
+# (a host with a graphical display / X server). If spawn_manager.py isn't present, keep the
 # bridge importable and make /spawn return 503.
 
 try:
