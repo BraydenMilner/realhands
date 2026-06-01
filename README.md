@@ -2,6 +2,7 @@
 
 **Give your AI agent a real, logged-in browser.**
 
+[![tests](https://github.com/BraydenMilner/realhands/actions/workflows/ci.yml/badge.svg)](https://github.com/BraydenMilner/realhands/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![form](https://img.shields.io/badge/chrome-extension-brightgreen)
