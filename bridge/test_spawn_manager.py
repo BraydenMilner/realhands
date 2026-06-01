@@ -402,6 +402,7 @@ async def test_windows_no_display_env(monkeypatch, fake_popen, tmp_path):
 
 
 def test_find_chrome_linux(monkeypatch):
+    monkeypatch.delenv("CHROME_BIN", raising=False)
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
     monkeypatch.setattr(spawn_manager.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "google-chrome" else None)
 
@@ -410,6 +411,7 @@ def test_find_chrome_linux(monkeypatch):
 
 
 def test_find_chrome_linux_chromium_fallback(monkeypatch):
+    monkeypatch.delenv("CHROME_BIN", raising=False)
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
 
     def fake_which(name):
@@ -427,6 +429,7 @@ def test_find_chrome_linux_chromium_fallback(monkeypatch):
 
 
 def test_find_chrome_macos(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHROME_BIN", raising=False)
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Darwin")
     mac_path = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
