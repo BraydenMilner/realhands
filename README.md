@@ -36,31 +36,44 @@ flag (which modern Chrome blocks on the default profile anyway).
   it fails closed when it can't verify a target. (Disabling it requires editing
   the source.)
 
-## Two ways to use it
+## Two ways in
 
-**A) Bring your own agent (composable).**
-Install the extension, run the bridge, and `POST` to
-`http://localhost:7878/call` with `{ "browser_id": ..., "method": ..., "params": ... }`
-from anything that speaks HTTP. Executor methods include navigate, click, type,
-screenshot, scroll, get page info, wait-for-url, and more. The full, authoritative
-API is served at `GET /openapi.json` (FastAPI auto-docs at `/docs`).
+Pick the door that matches you — a person who wants to *use* an agent, or an
+agent that wants to *drive a browser*.
 
-**B) Bring your own key (turnkey).**
-Run the bundled vision loop (`examples/byo_key_agent.py`) with **any model + your key** —
-one shot, no router to configure:
+### 🗣️ Use it yourself — the chat panel
+
+You want an agent, not a coding project. Load the extension, start the bridge
+(double-click `start-mac.command` / `start-windows.bat` — first run installs
+everything), open the **RealHands side panel**, connect any model + key once, and
+type what you want done. It drives your real, logged-in Chrome while you watch —
+and **asks before each action** by default. No terminal, no API wiring.
+
+Prefer a terminal? The same bring-your-own-key loop runs as a one-liner — any
+model + your key, no router to configure:
 ```bash
 VISION_MODEL='gemini/gemini-2.5-flash' VISION_API_KEY='…' python3 examples/byo_key_agent.py "log in and open my profile"
 ```
 `VISION_MODEL` is any [LiteLLM](https://docs.litellm.ai/docs/providers) id — `gemini/…`,
 `openrouter/…`, `anthropic/…`, or `openai/<name>` + `VISION_BASE_URL` for a local
-server (vLLM/Ollama). It screenshots → decides → acts → repeats (as fast as the model
-answers; reasoning models and streaming backends are handled), honoring the money guard.
-For a free 2-step setup or a cheap→fallback chain, pass multiple models — see
-`VisionConfig.models`.
+server (vLLM/Ollama). It screenshots → decides → acts → repeats (reasoning models
+and streaming backends are handled), honoring the money guard. For a free 2-step
+setup or a cheap→fallback chain, pass multiple models — see `VisionConfig.models`.
 
-> **Model notes.** Capability and behavior vary by model — some are faster, some are
-> more capable, and some decline certain actions. Pick the one that fits your task;
-> RealHands just feeds it the screenshot and runs its decision.
+> **Model notes.** Capability varies by model — some are faster, some more capable,
+> some decline certain actions. A small local vision model (e.g. Qwen2-VL) can
+> drive it, but leans on the clear, spelled-out browser instructions RealHands
+> already sends in its system prompt; bigger models need less hand-holding. Pick
+> what fits your task — RealHands just feeds it the screenshot and runs its decision.
+
+### 🤖 Give it to your agent — the local API
+
+Already have an agent (Claude, GPT, your own script)? Run the bridge and `POST`
+JSON to `http://localhost:7878/call` with `{ "method": …, "params": … }` —
+navigate, click, type, screenshot, scroll, get-page-info, wait-for-url, and more.
+Drive one browser or a whole swarm by `browser_id`. Start at
+**[AGENTS.md](AGENTS.md)**; the full, authoritative schema is served at
+`GET /openapi.json` (FastAPI docs at `/docs`).
 
 ## What a run looks like
 
@@ -83,6 +96,11 @@ Point it at a money-moving control and the guard stops it cold — `done :: mone
 > 📹 A screenshot/GIF walkthrough is coming. Until then, the Quickstart below gets you running in ~2 minutes.
 
 ## Quickstart
+
+> **Just want the chat panel?** 1) Load the extension (step 1 below). 2) Double-click
+> `start-mac.command` / `start-windows.bat` to start the bridge. 3) Open the
+> **RealHands side panel** from the extension, connect your model + key, and type a
+> task. The steps below are the developer/API path.
 
 1. **Load the extension.** `chrome://extensions` → enable *Developer mode* → *Load
    unpacked* → select the `extension/` folder.

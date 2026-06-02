@@ -11,8 +11,11 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 if [ ! -d .venv ]; then
-  echo "First run — setting things up (about a minute)…"
-  python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt || {
+  echo "First run — setting things up (a minute or two)…"
+  # bridge core, then the chat deps (litellm) so the side-panel chat works out of the box.
+  python3 -m venv .venv \
+    && .venv/bin/pip install -q -r requirements.txt \
+    && .venv/bin/pip install -q -r ../vision/requirements.txt || {
     echo "Setup failed. Make sure you have an internet connection and try again."; read -r; exit 1; }
 fi
 

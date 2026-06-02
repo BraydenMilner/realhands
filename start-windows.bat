@@ -14,9 +14,16 @@ if errorlevel 1 (
 )
 
 if not exist .venv (
-  echo First run - setting things up ^(about a minute^)...
+  echo First run - setting things up ^(a minute or two^)...
   python -m venv .venv
+  REM bridge core, then the chat deps (litellm) so the side-panel chat works out of the box.
   .venv\Scripts\pip install -q -r requirements.txt
+  if errorlevel 1 (
+    echo Setup failed. Check your internet connection and try again.
+    pause
+    exit /b 1
+  )
+  .venv\Scripts\pip install -q -r ..\vision\requirements.txt
   if errorlevel 1 (
     echo Setup failed. Check your internet connection and try again.
     pause
