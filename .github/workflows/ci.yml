@@ -13,7 +13,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r bridge/requirements.txt pytest pytest-asyncio
+      # bridge/chat_runner.py is the bridge half of the chat/vision feature, so the
+      # bridge test suite needs the vision deps (litellm, ddgs, trafilatura) too.
+      - run: pip install -r bridge/requirements.txt -r vision/requirements.txt pytest pytest-asyncio
       - run: cd bridge && python -m pytest -q
 
   vision:
