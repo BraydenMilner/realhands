@@ -8,11 +8,17 @@
     "tabs",
     "alarms",
     "windows",
-    "debugger"
+    "debugger",
+    "sidePanel"
   ],
   "host_permissions": [
-    "https://*/*"
+    "https://*/*",
+    "http://localhost:7878/*",
+    "http://127.0.0.1:7878/*"
   ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "background": {
     "service_worker": "background.js"
   },

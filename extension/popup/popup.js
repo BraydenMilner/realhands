@@ -12,6 +12,7 @@ const els = {
   saveUrl: document.getElementById("save-url"),
   saveToken: document.getElementById("save-token"),
   saveId: document.getElementById("save-id"),
+  openChat: document.getElementById("open-chat"),
   version: document.getElementById("version"),
 };
 
@@ -63,6 +64,29 @@ chrome.runtime.sendMessage({ from: "popup", action: "get_state" }, (res) => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !changes.realhands_state) return;
   render(changes.realhands_state.newValue);
+});
+
+// Open the chat side panel. sidePanel.open() must run inside the user gesture,
+// so call it directly here (no async hop that would lose the gesture) and pass
+// the current window. Close the popup once the panel is up.
+els.openChat.addEventListener("click", () => {
+  const open = (opts) => {
+    if (!chrome.sidePanel || !chrome.sidePanel.open) return;
+    chrome.sidePanel.open(opts).then(
+      () => window.close(),
+      () => {
+        /* leave popup open on failure */
+      },
+    );
+  };
+  if (chrome.windows && chrome.windows.getCurrent) {
+    chrome.windows.getCurrent((win) => {
+      if (win && typeof win.id === "number") open({ windowId: win.id });
+      else open({});
+    });
+  } else {
+    open({});
+  }
 });
 
 els.reconnect.addEventListener("click", () => {

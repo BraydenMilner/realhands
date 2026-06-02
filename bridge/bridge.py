@@ -27,6 +27,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from agent_runner import AgentRunner, VisionUnavailable
 from event_broker import EventBroker
 from executor_client import ExecutorClient, ExecutorError
 
@@ -190,6 +191,22 @@ class SpawnBody(BaseModel):
     start_url: Optional[str] = None
 
 
+class AgentRunBody(BaseModel):
+    task: str
+    browser_id: Optional[str] = None
+    max_steps: int = 25
+    mode: str = "ask"  # "ask" gates each actuating step; "auto" never waits.
+
+
+class AgentStopBody(BaseModel):
+    run_id: Optional[str] = None  # omitted -> stop all runs.
+
+
+class AgentApproveBody(BaseModel):
+    run_id: str
+    approved: bool
+
+
 # ---------- app factory ----------
 
 
@@ -204,6 +221,10 @@ def _init_state(app: FastAPI) -> None:
     app.state.broker = EventBroker()
     app.state.executors = {}  # browser_id -> ExecutorClient
     app.state.started_at = time.time()
+    # BYO-key agent loop state: run_id -> {task, stop_event, approve_event,
+    # approved}. The AgentRunner owns these; endpoints below drive it.
+    app.state.agent_runs = {}
+    app.state.agent_runner = AgentRunner(app)
     app.state.vault = None
     if VaultManager is not None:
         try:
@@ -566,6 +587,48 @@ async def events(request: Request, last_id: Optional[int] = None) -> StreamingRe
             "Connection": "keep-alive",
         },
     )
+
+
+# ---------- BYO-key agent loop ----------
+
+
+@app.post("/agent/run")
+async def agent_run(body: AgentRunBody) -> JSONResponse:
+    """Start the server-side agent loop in the background. Returns {run_id}.
+
+    503 if the sibling vision tier (litellm) isn't installed — the loop can't
+    decide actions without it.
+    """
+    runner: AgentRunner = app.state.agent_runner
+    try:
+        run_id = runner.start(
+            task=body.task,
+            browser_id=body.browser_id,
+            max_steps=body.max_steps,
+            mode=body.mode,
+        )
+    except VisionUnavailable:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "vision deps not installed; pip install -r vision/requirements.txt"},
+        )
+    return JSONResponse({"run_id": run_id})
+
+
+@app.post("/agent/stop")
+async def agent_stop(body: Optional[AgentStopBody] = None) -> JSONResponse:
+    """Stop one run (run_id given) or all runs (run_id omitted)."""
+    runner: AgentRunner = app.state.agent_runner
+    run_id = body.run_id if body else None
+    return JSONResponse(runner.stop(run_id))
+
+
+@app.post("/agent/approve")
+async def agent_approve(body: AgentApproveBody) -> JSONResponse:
+    """Approve (or reject) a run's pending awaiting_approval step ("ask" mode).
+    approved:true -> the loop executes the action; false -> the run stops."""
+    runner: AgentRunner = app.state.agent_runner
+    return JSONResponse(runner.approve(body.run_id, body.approved))
 
 
 @app.post("/credentials/read")

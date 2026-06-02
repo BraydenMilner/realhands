@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>realhands chat</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header>
+      <div class="head-left">
+        <h1>realhands</h1>
+        <span id="version" class="version"></span>
+      </div>
+      <span id="connection-pill" class="pill pill-idle">idle</span>
+    </header>
+
+    <section class="readout" id="readout">
+      <div class="stat">
+        <span class="stat-label">Run</span>
+        <span id="stat-run" class="stat-value">—</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Step</span>
+        <span id="stat-step" class="stat-value">0</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Model</span>
+        <span id="stat-model" class="stat-value">—</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Cost</span>
+        <span id="stat-cost" class="stat-value">$0.0000</span>
+      </div>
+    </section>
+
+    <main id="messages" class="messages" aria-live="polite"></main>
+
+    <section id="approval-bar" class="approval-bar hidden">
+      <div class="approval-text">
+        <span class="approval-title">Approve action?</span>
+        <span id="approval-detail" class="approval-detail"></span>
+      </div>
+      <div class="approval-actions">
+        <button id="approve-btn" type="button" class="btn-approve">Approve</button>
+        <button id="reject-btn" type="button" class="btn-reject">Reject</button>
+      </div>
+    </section>
+
+    <footer class="composer">
+      <div class="composer-controls">
+        <label class="mode-toggle">
+          <input id="mode-checkbox" type="checkbox" />
+          <span id="mode-label">Ask before acting</span>
+        </label>
+        <button id="stop-btn" type="button" class="btn-stop" disabled>Stop</button>
+      </div>
+      <div class="composer-input">
+        <button id="mic-btn" type="button" class="btn-mic" title="Speak your task">
+          <span class="mic-icon">&#127908;</span>
+        </button>
+        <textarea
+          id="task-input"
+          rows="1"
+          placeholder="Describe a task for the agent…"
+          spellcheck="false"
+        ></textarea>
+        <button id="send-btn" type="button" class="btn-send">Send</button>
+      </div>
+    </footer>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

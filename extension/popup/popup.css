@@ -136,3 +136,20 @@ button:disabled {
   opacity: 0.55;
   cursor: default;
 }
+
+.open-chat {
+  width: 100%;
+  background: #4c8bf5;
+  border-color: #4c8bf5;
+  color: #fff;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.open-chat:hover:not(:disabled) {
+  background: #3b7bea;
+}
+
+.open-chat:active:not(:disabled) {
+  background: #356fd6;
+}

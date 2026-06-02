@@ -782,6 +782,18 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   });
 });
 
+// ---------- side panel ----------
+
+// Make the chat side panel openable. A default_popup is configured on the
+// action, so action-click opens the popup (which carries an "Open chat" button
+// that calls chrome.sidePanel.open()). We still set the behavior defensively so
+// the panel is usable even if the popup is removed later.
+if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: false })
+    .catch(() => {});
+}
+
 // ---------- bootstrap ----------
 
 chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1 });
