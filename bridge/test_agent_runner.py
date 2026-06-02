@@ -76,6 +76,7 @@ class _FakeActionDecision:
         reasoning="because",
         model_used="fake-model",
         cost_usd=0.0001,
+        sensitive=False,
     ):
         self.action = action
         self.coordinates = coordinates
@@ -85,6 +86,7 @@ class _FakeActionDecision:
         self.reasoning = reasoning
         self.model_used = model_used
         self.cost_usd = cost_usd
+        self.sensitive = sensitive
 
 
 class _FakeModelConfig:
@@ -143,6 +145,15 @@ def clean_state():
     # started on a now-closed loop (e.g. the ephemeral-uvicorn SSE test) can't be
     # cancelled — its loop is gone — so swallow that; clearing the dict is enough.
     for rec in list(app.state.agent_runs.values()):
+        # Unblock anything parked on an Event (awaiting approval/reply/stop) so a
+        # cancelled task unwinds cleanly instead of bleeding into the next test.
+        for ev_name in ("stop_event", "approve_event", "reply_event"):
+            ev = rec.get(ev_name)
+            if ev is not None:
+                try:
+                    ev.set()
+                except Exception:
+                    pass
         t = rec.get("task")
         if t is not None and not t.done():
             try:
@@ -940,3 +951,91 @@ async def test_zoom_then_click_remaps_coordinates(http_client):
     # screenshot (10 + 10/1.25, 10 + 10/1.25) = (18,18) -> CSS /dpr = (9.0, 9.0).
     # (Un-remapped would be display/dpr = (5,5), so this pins the offset+scale.)
     assert (cx, cy) == (9.0, 9.0), f"remapped click coords were ({cx}, {cy}), expected (9.0, 9.0)"
+
+
+# ---------- gated mode ----------
+
+
+@pytest.mark.asyncio
+async def test_gated_sensitive_action_emits_awaiting_approval(http_client):
+    """gated mode: a sensitive=True actuating action emits awaiting_approval."""
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="click", coordinates=(10, 10), sensitive=True),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "click", "mode": "gated", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        events = await col.wait_for(run_id, {"awaiting_approval"})
+        # Stop the run cleanly so it doesn't leak a paused background task into
+        # the next test (the loop is parked in _await_approval otherwise).
+        await http_client.post("/agent/stop", json={"run_id": run_id})
+        await col.wait_for(run_id, {"stopped"})
+
+    approval = next(e for e in events if e["phase"] == "awaiting_approval")
+    assert approval.get("sensitive") is True
+    assert approval.get("await_id")
+    ex = app.state.executors["default"]
+    assert not any(m == "click_at" for (m, _p) in ex.calls)
+
+
+@pytest.mark.asyncio
+async def test_gated_sensitive_approval_is_sticky(http_client):
+    """gated mode: after approving a sensitive action, a subsequent sensitive
+    action runs WITHOUT a second prompt (sticky approval)."""
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="click", coordinates=(10, 10), sensitive=True),
+        _FakeActionDecision(action="click", coordinates=(20, 20), sensitive=True),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "click twice", "mode": "gated", "max_steps": 10}
+        )
+        run_id = r.json()["run_id"]
+
+        await col.wait_for(run_id, {"awaiting_approval"})
+        await http_client.post(
+            "/agent/approve", json={"run_id": run_id, "approved": True}
+        )
+        await asyncio.sleep(0.2)
+
+        await col.wait_for(run_id, {"done"}, timeout=5.0)
+
+    all_events = col.events
+    approvals = [e for e in all_events if e.get("run_id") == run_id and e.get("phase") == "awaiting_approval"]
+    assert len(approvals) == 1
+    assert any(e["phase"] == "done" and e.get("run_id") == run_id for e in all_events)
+
+    ex = app.state.executors["default"]
+    clicks = [p for (m, p) in ex.calls if m == "click_at"]
+    assert len(clicks) == 2
+
+
+@pytest.mark.asyncio
+async def test_gated_non_sensitive_action_runs_without_prompt(http_client):
+    """gated mode: a non-sensitive actuating action runs without any approval."""
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="click", coordinates=(10, 10), sensitive=False),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "click", "mode": "gated", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        events = await col.wait_for(run_id, {"done"})
+
+    assert not any(e.get("phase") == "awaiting_approval" for e in events)
+    assert any(e["phase"] == "done" for e in events)
+
+    ex = app.state.executors["default"]
+    assert any(m == "click_at" for (m, _p) in ex.calls)

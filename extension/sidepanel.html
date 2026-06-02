@@ -37,7 +37,7 @@
 
     <section id="approval-bar" class="approval-bar hidden">
       <div class="approval-text">
-        <span class="approval-title">Approve action?</span>
+        <span class="approval-title" id="approval-title">Approve action?</span>
         <span id="approval-detail" class="approval-detail"></span>
       </div>
       <div class="approval-actions">
@@ -49,8 +49,11 @@
     <footer class="composer">
       <div class="composer-controls">
         <label class="mode-toggle">
-          <input id="mode-checkbox" type="checkbox" />
-          <span id="mode-label">Ask before acting</span>
+          <select id="mode-select" class="mode-select">
+            <option value="gated" selected>Gated (approve sensitive)</option>
+            <option value="ask">Ask before acting</option>
+            <option value="auto">Full auto</option>
+          </select>
         </label>
         <button id="stop-btn" type="button" class="btn-stop" disabled>Stop</button>
       </div>

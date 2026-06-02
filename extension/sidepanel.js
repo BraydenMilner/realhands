@@ -31,8 +31,7 @@ const els = {
   approvalDetail: document.getElementById("approval-detail"),
   approveBtn: document.getElementById("approve-btn"),
   rejectBtn: document.getElementById("reject-btn"),
-  modeCheckbox: document.getElementById("mode-checkbox"),
-  modeLabel: document.getElementById("mode-label"),
+  modeSelect: document.getElementById("mode-select"),
   stopBtn: document.getElementById("stop-btn"),
   micBtn: document.getElementById("mic-btn"),
   taskInput: document.getElementById("task-input"),
@@ -322,7 +321,7 @@ async function sendTask() {
   // event) so this fresh task never dispatches as an answer to an old run.
   exitReplyMode();
 
-  const mode = els.modeCheckbox.checked ? "auto" : "ask";
+  const mode = els.modeSelect.value || "gated";
 
   addUserBubble(task);
   els.taskInput.value = "";
@@ -373,7 +372,8 @@ function showApproval(evt) {
   pendingApprovalRunId = evt.run_id;
   pendingApprovalAwaitId = evt.await_id || null;
   const bits = [evt.action, evt.reasoning].filter(Boolean).join(" — ");
-  els.approvalDetail.textContent = bits || "Proposed action";
+  const label = evt.sensitive ? "⚠️ Approve sensitive action" : "Approve action?";
+  els.approvalDetail.textContent = bits || label;
   els.approvalDetail.title = bits || "";
   els.approvalBar.classList.remove("hidden");
 }
@@ -611,12 +611,6 @@ function autoSizeTextarea() {
   els.taskInput.style.height = `${Math.min(els.taskInput.scrollHeight, 120)}px`;
 }
 
-function updateModeLabel() {
-  els.modeLabel.textContent = els.modeCheckbox.checked
-    ? "Full auto"
-    : "Ask before acting";
-}
-
 // ---------- wiring ----------
 
 els.sendBtn.addEventListener("click", onSend);
@@ -624,7 +618,6 @@ els.stopBtn.addEventListener("click", stopRun);
 els.approveBtn.addEventListener("click", () => respondApproval(true));
 els.rejectBtn.addEventListener("click", () => respondApproval(false));
 els.micBtn.addEventListener("click", toggleMic);
-els.modeCheckbox.addEventListener("change", updateModeLabel);
 
 els.taskInput.addEventListener("input", autoSizeTextarea);
 els.taskInput.addEventListener("keydown", (e) => {
@@ -636,4 +629,3 @@ els.taskInput.addEventListener("keydown", (e) => {
 });
 
 initSpeech();
-updateModeLabel();

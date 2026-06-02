@@ -3,7 +3,7 @@
 This is the BRIDGE half of the RealHands chat panel. The extension's chat panel
 POSTs a task to /agent/run; this module runs the loop in the background:
 
-    screenshot  ->  decide_action (vision tier)  ->  (ask-gate)  ->  act  ->  repeat
+    screenshot  ->  decide_action (vision tier)  ->  (gate)  ->  act  ->  repeat
 
 Each step publishes a structured {type:"agent", ...} event to the EventBroker so
 the panel can render progress live off the existing GET /events SSE stream.
@@ -12,10 +12,6 @@ The vision tier lives in the sibling `vision/` package and needs litellm. We
 import it LAZILY (in `_load_vision`) so the bridge stays importable on a host
 that hasn't `pip install -r vision/requirements.txt`'d yet — /agent/run returns
 503 in that case rather than crashing the whole bridge at import time.
-
-Money-moving actions are guarded upstream (vision's high_stakes_actions short-
-circuits to done) and again at the bridge's /call money-guard; this loop never
-clicks redeem/deposit/transfer. We do NOT touch those token lists here.
 """
 
 from __future__ import annotations
@@ -112,7 +108,7 @@ class AgentRunner:
 
     State lives on app.state.agent_runs (a dict run_id -> record) so the bridge
     endpoints and this runner share one source of truth and tests can inspect
-    it. Each record:
+    it.     Each record:
         {
           "task": asyncio.Task,          # the background loop
           "stop_event": asyncio.Event,   # set by /agent/stop
@@ -122,6 +118,7 @@ class AgentRunner:
           "reply": str|None,             # the latest human answer text
           "awaiting": None|"approval"|"input",  # what the loop is paused for
           "await_id": str|None,          # nonce for the pending approval/input.
+          "sensitive_approved": bool,    # gated mode: sticky per-run approval
         }
     """
 
@@ -175,6 +172,7 @@ class AgentRunner:
             "awaiting": None,
             "await_id": None,
             "browser_id": resolved_browser_id,
+            "sensitive_approved": False,
         }
         self._runs[run_id] = record
 
@@ -489,11 +487,19 @@ class AgentRunner:
                                                at=time.strftime("%H:%M:%S")))
                 continue
 
-            # ---- ask-gate before any actuating action ----
+            # ---- approval gate before any actuating action ----
+            needs_approval = False
             if mode == "ask" and action in _ACTUATING:
+                needs_approval = True
+            elif mode == "gated" and action in _ACTUATING:
+                if getattr(decision, "sensitive", False) and not rec.get("sensitive_approved"):
+                    needs_approval = True
+
+            if needs_approval:
                 await_id = uuid.uuid4().hex
-                rec["awaiting"] = "approval"  # set BEFORE publishing
+                rec["awaiting"] = "approval"
                 rec["await_id"] = await_id
+                sensitive = getattr(decision, "sensitive", False) and mode == "gated"
                 await self._publish(
                     run_id=run_id,
                     step=step,
@@ -504,6 +510,7 @@ class AgentRunner:
                     confidence=decision.confidence,
                     selector_hint=decision.selector_hint,
                     coordinates=decision.coordinates,
+                    sensitive=sensitive,
                     text=redact_text(decision.text) if decision.action == "navigate" else (
                         "[REDACTED]" if decision.action == "type" and decision.text else None
                     ),
@@ -512,6 +519,8 @@ class AgentRunner:
                 if stop_event.is_set() or not approved:
                     await self._publish(run_id=run_id, step=step, phase="stopped")
                     break
+                if mode == "gated" and getattr(decision, "sensitive", False):
+                    rec["sensitive_approved"] = True
 
             # ---- act ----
             if view and action in ("click", "type", "scroll"):

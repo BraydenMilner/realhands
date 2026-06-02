@@ -1,9 +1,8 @@
 """Top-level entry point: decide_action().
 
 Wraps the tier router with:
-  1. Money-action guardrail (short-circuits BEFORE any LLM call).
-  2. Step-history truncation to last 5.
-  3. Audit logging + screenshot persistence.
+   1. Step-history truncation to last 5.
+   2. Audit logging + screenshot persistence.
 """
 
 from __future__ import annotations
@@ -19,24 +18,6 @@ from vision.router import route
 
 
 HISTORY_MAX = 5
-
-
-# CANONICAL MONEY TOKENS — keep verbatim in sync with VisionConfig.high_stakes_actions
-# (models.py), prompts.py, background.js, bridge.py.
-MONEY_TOKENS = frozenset(
-    {
-        "redeem",
-        "redemption",
-        "deposit",
-        "withdraw",
-        "withdrawal",
-        "transfer",
-        "cashout",
-        "cash out",
-        "cashier",
-        "payout",
-    }
-)
 
 
 # URL query-param names whose VALUES may carry secrets — scrubbed before audit.
@@ -146,32 +127,6 @@ def _scrub_decision_value(value):
     return value
 
 
-def _detect_money_action(
-    task_context: str, page_url: str, high_stakes: set[str]
-) -> Optional[str]:
-    """Token match against task + url. Returns the matched token or None.
-
-    Substring match on lowercased haystack. The token set is small enough that
-    false positives are cheap (we'd just decline a non-money action that
-    happens to contain the word "deposit") and false negatives are the
-    expensive case (we'd auto-click a money button).
-    """
-    haystack = f"{task_context} {page_url}".lower()
-    # `high_stakes` is a set (unordered). Return the token that appears EARLIEST
-    # in the haystack so the result is deterministic regardless of set ordering;
-    # ties broken by token length (longer/more-specific first).
-    best_token: Optional[str] = None
-    best_pos = len(haystack) + 1
-    for token in high_stakes:
-        pos = haystack.find(token.lower())
-        if pos == -1:
-            continue
-        if pos < best_pos or (pos == best_pos and len(token) > len(best_token or "")):
-            best_pos = pos
-            best_token = token
-    return best_token
-
-
 def _redacted_decision_dump(decision: ActionDecision) -> dict:
     """model_dump with the typed `text` redacted for type-actions.
 
@@ -195,11 +150,10 @@ async def decide_action(
     """Single entry point. See vision-service spec for the full contract.
 
     The function:
-      1. Applies the money-action guardrail (no LLM call if triggered).
-      2. Truncates step history to the most recent 5 items.
-      3. Persists the screenshot to the content-addressed store.
-      4. Runs the tier router (escalating as needed).
-      5. Appends one audit row to the JSONL log.
+       1. Truncates step history to the most recent 5 items.
+       2. Persists the screenshot to the content-addressed store.
+       3. Runs the tier router (escalating as needed).
+       4. Appends one audit row to the JSONL log.
 
     Returns the final ActionDecision. The decision is also written to the audit
     log; callers don't need to log it again.
@@ -209,51 +163,13 @@ async def decide_action(
 
     start_wall = time.monotonic()
 
-    # ---- step 1: money-action guardrail ------------------------------------
-    money_hit = _detect_money_action(
-        task_context, page_url, config.high_stakes_actions
-    )
-    if money_hit:
-        decision = ActionDecision(
-            action="done",
-            coordinates=None,
-            selector_hint=None,
-            text=None,
-            confidence=1.0,
-            reasoning="money_action_requires_human",
-            model_used="guardrail",
-            cost_usd=0.0,
-            duration_ms=int((time.monotonic() - start_wall) * 1000),
-            escalations=[],
-        )
-        # Still record the screenshot + audit row — we want a full trail of
-        # what would have happened.
-        try:
-            digest, _ = save_screenshot(screenshot, config.resolved_screenshot_dir())
-        except Exception:  # noqa: BLE001
-            digest = "unhashed"
-        append_audit(
-            config.resolved_audit_path(),
-            {
-                "at": now_iso(),
-                "screenshot_sha256": digest,
-                "task_context": _scrub_text(task_context),
-                "page_url": _scrub_text(page_url),
-                "history_len": len(step_history),
-                "models": [m.model for m in config.models],
-                "guardrail_triggered": money_hit,
-                "decision": _redacted_decision_dump(decision),
-            },
-        )
-        return decision
-
-    # ---- step 2: truncate history ------------------------------------------
+    # ---- step 1: truncate history ------------------------------------------
     history = list(step_history[-HISTORY_MAX:])
 
-    # ---- step 3: persist screenshot ----------------------------------------
+    # ---- step 2: persist screenshot ----------------------------------------
     digest, _ = save_screenshot(screenshot, config.resolved_screenshot_dir())
 
-    # ---- step 4: model router (one-shot, or optional fallback chain) --------
+    # ---- step 3: model router (one-shot, or optional fallback chain) --------
     decision = await route(
         screenshot=screenshot,
         task_context=task_context,
@@ -262,7 +178,7 @@ async def decide_action(
         config=config,
     )
 
-    # ---- step 5: audit -----------------------------------------------------
+    # ---- step 4: audit -----------------------------------------------------
     append_audit(
         config.resolved_audit_path(),
         {

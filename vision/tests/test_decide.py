@@ -197,95 +197,6 @@ async def test_all_models_low_confidence_aborts(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. Money-action guardrail — short-circuits BEFORE any LLM call.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_money_action_guardrail_no_llm_calls(tmp_path):
-    config = _config(tmp_path)
-    calls: list[str] = []
-
-    async def fake_acompletion(model: str, **kwargs):
-        calls.append(model)
-        return _fake_response(_HAPPY_PAYLOAD)
-
-    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion):
-        decision = await decide_action(
-            screenshot=_png_bytes(),
-            task_context="redeem $50 from example.com",
-            step_history=[],
-            page_url="https://example.com/cashier",
-            config=config,
-        )
-
-    assert decision.action == "done"
-    assert decision.reasoning == "money_action_requires_human"
-    assert decision.confidence == 1.0
-    assert decision.model_used == "guardrail"
-    assert calls == []
-    rows = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["guardrail_triggered"] == "redeem"
-
-
-@pytest.mark.asyncio
-async def test_money_action_guardrail_matches_each_token(tmp_path):
-    canonical = [
-        "redeem", "redemption", "deposit", "withdraw", "withdrawal",
-        "transfer", "cashout", "cash out", "cashier", "payout",
-    ]
-    for token in canonical:
-        config = _config(tmp_path / token.replace(" ", "_"))
-        decision = await decide_action(
-            screenshot=_png_bytes(),
-            task_context=f"please {token} my balance",
-            step_history=[],
-            page_url="https://example.com/wallet",
-            config=config,
-        )
-        assert decision.action == "done", f"token {token!r} failed to trigger"
-        assert decision.reasoning == "money_action_requires_human"
-
-
-@pytest.mark.asyncio
-async def test_money_guard_fires_on_selector_hint_cashout(tmp_path):
-    """A click the model recommends via a money-laden selector_hint is blocked
-    deterministically, even when the task looks innocuous."""
-    config = _config(tmp_path)
-    calls: list[str] = []
-    money_click = {
-        "action": "click",
-        "coordinates": [320, 480],
-        "selector_hint": "Cashout button in the wallet panel",
-        "text": None,
-        "confidence": 0.95,
-        "reasoning": "The wallet panel is open and this is the primary CTA.",
-    }
-
-    async def fake_acompletion(model: str, **kwargs):
-        calls.append(model)
-        return _fake_response(money_click)
-
-    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
-         patch("vision.router.litellm.completion_cost", return_value=0.0):
-        decision = await decide_action(
-            screenshot=_png_bytes(),
-            task_context="check my wallet balance",
-            step_history=[],
-            page_url="https://example.com/wallet",
-            config=config,
-        )
-
-    assert decision.action == "done"
-    assert decision.reasoning == "money_action_requires_human"
-    assert decision.confidence == 1.0
-    assert decision.coordinates is None
-    assert decision.selector_hint is None
-    assert len(calls) == 1  # response-content guard fires after the model is called
-
-
-# ---------------------------------------------------------------------------
 # 5. Step history truncation to last 5.
 # ---------------------------------------------------------------------------
 
@@ -729,3 +640,44 @@ def test_byo_example_zoom_helpers_present_and_correct():
     assert m._remap_from_view("scroll", (10, 10), view) == (8.0, 8.0)
     # Depth cap stops endless zoom.
     assert m._zoom_view(png, 50, 50, {**view, "depth": 3}) is None
+
+
+# ---------------------------------------------------------------------------
+# 15. sensitive flag round-trips from model JSON to ActionDecision.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sensitive_true_round_trips(tmp_path):
+    config = _config(tmp_path)
+    payload = {**_HAPPY_PAYLOAD, "sensitive": True}
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="pay the bill",
+            step_history=[], page_url="https://example.com/pay", config=config,
+        )
+
+    assert decision.sensitive is True
+
+
+@pytest.mark.asyncio
+async def test_sensitive_defaults_false_when_absent(tmp_path):
+    config = _config(tmp_path)
+    payload = {**_HAPPY_PAYLOAD}
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="log in",
+            step_history=[], page_url="https://example.com/login", config=config,
+        )
+
+    assert decision.sensitive is False

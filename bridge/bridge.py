@@ -83,53 +83,6 @@ def _validate_spawn_name(value: str, field_name: str) -> str:
         )
     return value
 
-# ---------- money-action guard (defense in depth at the bridge) ----------
-# Canonical money-token list — IDENTICAL to the set pinned across the runtime
-# (models.py, decide.py, prompts.py,
-# background.js). realhands never clicks redeem/deposit/transfer; upstream layers
-# may refuse these too, but the bridge enforces it again so a buggy/compromised caller
-# can't drive a money action through the executor.
-MONEY_TOKENS = [
-    "redeem",
-    "redemption",
-    "deposit",
-    "withdraw",
-    "withdrawal",
-    "transfer",
-    "cashout",
-    "cash out",
-    "cashier",
-    "payout",
-]
-
-# Methods that actuate the page (could trigger a money action). Read-only
-# methods (screenshot, get_page_info, wait_for_element, tabs_list, ...) are NOT
-# guarded — they only observe state.
-_MONEY_GUARDED_METHODS = frozenset(
-    {"click_at", "click_selector", "type", "key_press"}
-)
-
-# Param fields that can carry a target string a token would appear in.
-_MONEY_PARAM_FIELDS = ("selector", "target_selector", "text", "url")
-
-
-def _is_money_action(method: str, params: dict) -> bool:
-    """True if `method` actuates the page AND any money token appears in a
-    relevant param field. Mirrors the upstream money-action check
-    (lowercase substring match), scoped to the param fields the bridge sees.
-    """
-    if method not in _MONEY_GUARDED_METHODS:
-        return False
-    params = params or {}
-    for field in _MONEY_PARAM_FIELDS:
-        value = params.get(field)
-        if not isinstance(value, str):
-            continue
-        lowered = value.lower()
-        if any(token in lowered for token in MONEY_TOKENS):
-            return True
-    return False
-
 
 # ---------- vault import (sibling file, may not exist yet) ----------
 
@@ -197,7 +150,7 @@ class AgentRunBody(BaseModel):
     task: str
     browser_id: Optional[str] = None
     max_steps: int = Field(default=25, ge=1, le=100)
-    mode: Literal["ask", "auto"] = "ask"  # "ask" gates actuating steps.
+    mode: Literal["ask", "gated", "auto"] = "gated"
 
 
 class AgentStopBody(BaseModel):
@@ -648,14 +601,6 @@ async def executors_list() -> dict:
 
 @app.post("/call")
 async def call_method(body: CallBody) -> JSONResponse:
-    # Money-guard runs FIRST, before any executor resolution — a money action
-    # is refused regardless of browser_id (or whether one is connected).
-    if _is_money_action(body.method, body.params):
-        log.warning("blocked money action method=%s", body.method)
-        return JSONResponse(
-            status_code=403,
-            content={"error": {"code": "money_action_blocked"}},
-        )
     try:
         executor = _resolve_executor(body.browser_id)
     except _ResolveError as exc:
@@ -669,15 +614,6 @@ async def call_method(body: CallBody) -> JSONResponse:
 
 @app.post("/sequence")
 async def call_sequence(body: SequenceBody) -> JSONResponse:
-    # Reject the whole sequence if ANY step is a money action — never run a
-    # partial sequence up to the blocked step. Guard runs before resolution.
-    for step in body.steps:
-        if _is_money_action(step.method, step.params):
-            log.warning("blocked money action in sequence method=%s", step.method)
-            return JSONResponse(
-                status_code=403,
-                content={"error": {"code": "money_action_blocked"}},
-            )
     try:
         executor = _resolve_executor(body.browser_id)
     except _ResolveError as exc:

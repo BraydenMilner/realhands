@@ -31,24 +31,6 @@ from vision.models import (
 from vision.prompts import FEW_SHOT_EXAMPLES, SYSTEM_PROMPT, build_user_prompt
 
 
-# CANONICAL MONEY TOKENS — keep verbatim in sync with VisionConfig.high_stakes_actions
-# (models.py), decide.py, prompts.py, and the extension's background.js.
-MONEY_TOKENS = frozenset(
-    {
-        "redeem",
-        "redemption",
-        "deposit",
-        "withdraw",
-        "withdrawal",
-        "transfer",
-        "cashout",
-        "cash out",
-        "cashier",
-        "payout",
-    }
-)
-
-
 # Safe, non-actuating control actions. These never touch the page in a way that
 # matters (scroll/wait) or are themselves the human-in-the-loop (ask_user), so we
 # HONOR them regardless of confidence instead of discarding a low-confidence one
@@ -57,16 +39,6 @@ MONEY_TOKENS = frozenset(
 # the run aborts, which defeats the whole point of ask_user/scroll for weak models.
 # Actuating actions (click/type/navigate) stay gated by confidence_threshold.
 _ALWAYS_HONOR = frozenset({"ask_user", "scroll", "wait", "zoom"})
-
-
-def _contains_money_token(*values: Optional[str]) -> bool:
-    for value in values:
-        if not value:
-            continue
-        low = value.lower()
-        if any(token in low for token in MONEY_TOKENS):
-            return True
-    return False
 
 
 # Suppress LiteLLM's default chatter — it pollutes test output otherwise.
@@ -183,19 +155,7 @@ def _to_decision(
     text = parsed.get("text")
     reasoning = parsed.get("reasoning", "")
     confidence = float(parsed.get("confidence", 0.0))
-
-    # Deterministic money guard: a click/type whose selector_hint, text, or
-    # reasoning carries any canonical money token is forced to a human-required
-    # stop, regardless of upstream task-context matching.
-    if action in ("click", "type") and _contains_money_token(
-        selector_hint, text, reasoning
-    ):
-        action = "done"
-        parsed["coordinates"] = None
-        selector_hint = None
-        text = None
-        reasoning = "money_action_requires_human"
-        confidence = 1.0
+    sensitive = bool(parsed.get("sensitive", False))
 
     decision = ActionDecision(
         action=action,
@@ -204,6 +164,7 @@ def _to_decision(
         text=text,
         confidence=confidence,
         reasoning=reasoning,
+        sensitive=sensitive,
         model_used=model_used,
         model_index=model_index,
         cost_usd=cost_usd,

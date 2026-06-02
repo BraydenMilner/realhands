@@ -66,14 +66,24 @@ The **full, authoritative method list + schemas** is always at
 
 A minimal reference loop is in `examples/byo_key_agent.py`.
 
+## Autonomy levels — ask your user
+
+Before starting a browser-automation task, **ask your user how autonomous they
+want the agent to be**. Then pass the matching `mode` when starting a run via
+`POST /agent/run`:
+
+| mode | behavior |
+|---|---|
+| `ask` | Confirm every actuating action before executing (most cautious). |
+| `gated` | Runs on its own but **pauses for explicit approval on high-risk actions** (payments, sending/publishing, deleting data, entering credentials). Once approved, subsequent sensitive actions run without a second prompt. **Recommended default.** |
+| `auto` | Full autonomy — never asks. Use only when the user is comfortable. |
+
+Frame it as: the human decides their own risk tolerance; the tool does not
+restrict use.
+
 ## Safety — read this
 
-There is a built-in **money guard**. Any attempt to click or type on a
-money-moving control (deposit / withdraw / transfer / cashout / cashier / …) is
-**refused** and returns a `money_action_blocked` error. This is intentional —
-surface the situation to the human; do not try to work around it.
-
-Also: never read, echo, or store password-field contents.
+Never read, echo, or store password-field contents.
 
 ## Health check
 

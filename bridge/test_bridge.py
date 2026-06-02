@@ -7,7 +7,6 @@ Covers:
 - 503 when no executor is connected at all.
 - /executors lists every connected browser.
 - /call success and error paths (executor responds with {result} or {error}).
-- money-guard 403 still fires (per /call and /sequence).
 - /register returns a 200 HTML page.
 - keepalive/heartbeat events are NOT published to /events.
 - /credentials/read: 404 on missing key, success path with stub vault.
@@ -475,65 +474,6 @@ async def test_call_error_path_returns_200(http_client, fake_executor):
     body = r.json()
     assert body["error"]["code"] == "boom_code"
     assert body["error"]["message"] == "exploded"
-
-
-# ---------- money guard ----------
-
-
-@pytest.mark.asyncio
-async def test_call_money_action_blocked_403(http_client):
-    """A click on a 'redeem' selector is refused at the bridge with 403,
-    even before an executor is connected (the guard runs first)."""
-    r = await http_client.post(
-        "/call",
-        json={"method": "click_selector", "params": {"selector": "button.redeem-now"}},
-    )
-    assert r.status_code == 403, r.text
-    assert r.json()["error"]["code"] == "money_action_blocked"
-
-
-@pytest.mark.asyncio
-async def test_call_money_action_blocked_with_executor(http_client, fake_executor):
-    """Money-guard fires per /call even when an executor IS connected and even
-    when a browser_id is given."""
-    fake_executor({"click_selector": lambda p: {"result": {}}}, browser_id="alpha")
-    r = await http_client.post(
-        "/call",
-        json={
-            "browser_id": "alpha",
-            "method": "click_selector",
-            "params": {"selector": "#deposit-btn"},
-        },
-    )
-    assert r.status_code == 403, r.text
-    assert r.json()["error"]["code"] == "money_action_blocked"
-
-
-@pytest.mark.asyncio
-async def test_call_readonly_method_not_blocked_by_money_guard(http_client):
-    """Read-only methods are never money-guarded, even with a money token in a
-    param. With no executor connected the guard passes through to 503."""
-    r = await http_client.post(
-        "/call",
-        json={"method": "wait_for_element", "params": {"selector": "div.cashier"}},
-    )
-    assert r.status_code == 503, r.text
-
-
-@pytest.mark.asyncio
-async def test_sequence_money_action_blocked_403(http_client):
-    """A sequence containing any money action is rejected wholesale with 403."""
-    r = await http_client.post(
-        "/sequence",
-        json={
-            "steps": [
-                {"method": "navigate", "params": {"url": "https://example.com/"}},
-                {"method": "click_selector", "params": {"selector": "#deposit-btn"}},
-            ]
-        },
-    )
-    assert r.status_code == 403, r.text
-    assert r.json()["error"]["code"] == "money_action_blocked"
 
 
 # ---------- /register ----------

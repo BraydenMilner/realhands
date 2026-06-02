@@ -49,80 +49,6 @@ function makeError(code, message) {
   return err;
 }
 
-// ---------- money-action guard (last-resort, defense in depth) ----------
-//
-// This is the FINAL line of defense. Upstream layers (the bridge and
-// the optional vision tier's money-action checks, and
-// the bridge) are all supposed to refuse money-moving clicks before they ever
-// reach the executor. This guard exists so that even if every one of those
-// upstream guards fails or is bypassed, the executor itself still refuses to
-// click/type/submit anything that looks like a redeem/deposit/withdraw/etc.
-//
-// MONEY_TOKENS is the canonical set, identical to the list shared across
-// models.py, decide.py, prompts.py,
-// bridge.py. Matching is conservative: a lowercase substring match of any token
-// against the selector string, any provided text, the page URL, and (best
-// effort) the target element's innerText / aria-label / nearby label text.
-const MONEY_TOKENS = [
-  "redeem",
-  "redemption",
-  "deposit",
-  "withdraw",
-  "withdrawal",
-  "transfer",
-  "cashout",
-  "cash out",
-  "cashier",
-  "payout",
-];
-
-// True if any canonical money token appears as a substring of any provided
-// string. Inputs may be undefined/null; those are skipped.
-function textIsMoneyAction(...candidates) {
-  for (const c of candidates) {
-    if (c == null) continue;
-    const s = String(c).toLowerCase();
-    if (!s) continue;
-    for (const tok of MONEY_TOKENS) {
-      if (s.includes(tok)) return true;
-    }
-  }
-  return false;
-}
-
-// Ask the content script to describe a target element (by point, by selector,
-// or the active element). Returns { ok, text }:
-//   ok=true  -> the content script responded; `text` is the joined visible
-//               text / aria-label / label (possibly empty if the element
-//               legitimately has none).
-//   ok=false -> the content script could NOT be reached, so we could not verify
-//               the target at all. Callers whose ONLY money signal is the
-//               element text (coordinate clicks, blind Enter) must FAIL CLOSED
-//               on ok=false rather than trust an empty string.
-async function describeTarget(tabId, method, params) {
-  try {
-    const inner = await chrome.tabs.sendMessage(tabId, { method, params });
-    if (inner && inner.result) {
-      const r = inner.result;
-      return { ok: true, text: [r.text, r.aria_label, r.label].filter(Boolean).join(" ") };
-    }
-    return { ok: false, text: "" };
-  } catch {
-    // content script may be absent (e.g. just after a navigation)
-    return { ok: false, text: "" };
-  }
-}
-
-// Describe with one retry — the content script may be mid-injection right after
-// a navigation. Used by the coordinate / blind actuation paths that fail closed
-// when the target cannot be read.
-async function describeTargetVerified(tabId, method, params) {
-  const first = await describeTarget(tabId, method, params);
-  if (first.ok) return first;
-  await sleep(300);
-  return describeTarget(tabId, method, params);
-}
-
 // ---------- chrome.debugger (CDP) infrastructure ----------
 
 async function ensureAttached(tabId) {
@@ -284,21 +210,6 @@ const BG_HANDLERS = {
       throw makeError("invalid_params", "click_at requires numeric x, y");
     }
     const tab = await resolveTab({ tab_id });
-    // Last-resort money guard. A coordinate click has NO selector — the element
-    // under the point is the only money signal besides the URL, so we MUST be
-    // able to read it. If the content script can't describe the target, FAIL
-    // CLOSED rather than fall back to a URL-only check (a redeem button on a
-    // tokenless SPA route would otherwise slip through).
-    const desc = await describeTargetVerified(tab.id, "describe_point", { x, y });
-    if (!desc.ok) {
-      throw makeError(
-        "money_action_unverifiable",
-        `click_at refused: cannot read the element at (${x},${y}) to verify it is not a money action`,
-      );
-    }
-    if (textIsMoneyAction(desc.text, tab.url)) {
-      throw makeError("money_action_blocked", `click_at refused (money action): ${desc.text || tab.url}`);
-    }
     await cdpClick(tab.id, x, y, { button, clickCount });
     return { x, y, tab_id: tab.id };
   },
@@ -306,14 +217,6 @@ const BG_HANDLERS = {
   async click_selector({ selector, tab_id }) {
     if (!selector) throw makeError("invalid_params", "click_selector requires selector");
     const tab = await resolveTab({ tab_id });
-    // Last-resort money guard: match against the selector string, the element's
-    // visible text / aria-label, and the page URL. The selector string is always
-    // available as a money signal (and contentBox below also needs the content
-    // script), so a best-effort describe is sufficient here — no fail-closed.
-    const desc = await describeTarget(tab.id, "describe_element", { selector });
-    if (textIsMoneyAction(selector, desc.text, tab.url)) {
-      throw makeError("money_action_blocked", `click_selector refused (money action): ${selector}`);
-    }
     const box = await contentBox(tab.id, selector);
     if (box.visible === false) {
       throw makeError("element_not_interactable", `selector found but not visible: ${selector}`);
@@ -337,28 +240,6 @@ const BG_HANDLERS = {
     const tab = await resolveTab({ tab_id });
     const clear = options.clear !== false;
 
-    // Last-resort money guard: refuse to type into / submit on a money action.
-    // With a selector the selector string is always a money signal (and the
-    // contentBox below needs the content script anyway). With coordinates the
-    // element text is the only signal, so FAIL CLOSED if it can't be read.
-    let targetText = "";
-    if (hasSelector) {
-      const desc = await describeTarget(tab.id, "describe_element", { selector });
-      targetText = desc.text;
-    } else {
-      const desc = await describeTargetVerified(tab.id, "describe_point", { x, y });
-      if (!desc.ok) {
-        throw makeError(
-          "money_action_unverifiable",
-          `type refused: cannot read the element at (${x},${y}) to verify it is not a money action`,
-        );
-      }
-      targetText = desc.text;
-    }
-    if (textIsMoneyAction(selector, text, targetText, tab.url)) {
-      throw makeError("money_action_blocked", `type refused (money action): ${selector || `${x},${y}`}`);
-    }
-
     if (hasSelector) {
       const box = await contentBox(tab.id, selector);
       if (box.visible === false) {
@@ -366,7 +247,6 @@ const BG_HANDLERS = {
       }
       const cx = box.x + box.w / 2;
       const cy = box.y + box.h / 2;
-      // Triple-click selects existing text so insertText replaces it; single-click just focuses.
       await cdpClick(tab.id, cx, cy, { clickCount: clear ? 3 : 1 });
     } else {
       await cdpClick(tab.id, x, y, { clickCount: clear ? 3 : 1 });
@@ -379,37 +259,6 @@ const BG_HANDLERS = {
   async key_press({ key, target_selector, modifiers, tab_id }) {
     if (!key) throw makeError("invalid_params", "key_press requires key");
     const tab = await resolveTab({ tab_id });
-    const isActuating = key === "Enter" || key === " " || key === "Spacebar" || key === "Space" || key === "NumpadEnter";
-    const focusesTarget = !!target_selector;
-    // Space and NumpadEnter also activate a focused button, so they require
-    // money-target verification and must fail closed when the focused element
-    // can't be read, just like Enter.
-    if (target_selector) {
-      const desc = await describeTarget(tab.id, "describe_element", { selector: target_selector });
-      if (!desc.ok) {
-        throw makeError(
-          "money_action_unverifiable",
-          `key_press refused: cannot read ${target_selector} to verify it is not a money action`,
-        );
-      }
-      if (textIsMoneyAction(target_selector, desc.text, tab.url)) {
-        throw makeError("money_action_blocked", `key_press refused (money action): ${target_selector}`);
-      }
-    } else if (isActuating) {
-      const desc = await describeTargetVerified(tab.id, "describe_active", {});
-      if (!desc.ok) {
-        throw makeError(
-          "money_action_unverifiable",
-          "key_press refused: cannot read the focused element to verify it is not a money submit",
-        );
-      }
-      if (textIsMoneyAction(desc.text, tab.url)) {
-        throw makeError("money_action_blocked", `key_press refused (money action): ${key}`);
-      }
-    }
-    if (focusesTarget && textIsMoneyAction(tab.url)) {
-      throw makeError("money_action_blocked", `key_press refused on money-related page: ${tab.url}`);
-    }
     if (target_selector) {
       const box = await contentBox(tab.id, target_selector);
       await cdpClick(tab.id, box.x + box.w / 2, box.y + box.h / 2);

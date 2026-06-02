@@ -31,10 +31,9 @@ flag (which modern Chrome blocks on the default profile anyway).
   (auto-downloaded once, **no admin, no policy**) with the extension loaded; your
   agent controls them all through the same API. Most users never need this — see
   [docs/PLATFORMS.md](docs/PLATFORMS.md).
-- **Safe by default.** A built-in guard **refuses** clicks/keys on money-moving
-  controls (deposit / withdraw / transfer / cashout / cashier / …) by default;
-  it fails closed when it can't verify a target. (Disabling it requires editing
-  the source.)
+- **Configurable safety.** An approval gate lets the user choose their autonomy
+  level: `gated` (approve high-risk actions once, then auto), `ask` (confirm
+  every action), or `auto` (full autonomy). The default is `gated`.
 
 ## Quickstart
 
@@ -59,7 +58,7 @@ VISION_MODEL='gemini/gemini-2.5-flash' VISION_API_KEY='…' python3 examples/byo
 `VISION_MODEL` is any [LiteLLM](https://docs.litellm.ai/docs/providers) id — `gemini/…`,
 `openrouter/…`, `anthropic/…`, or `openai/<name>` + `VISION_BASE_URL` for a local
 server (vLLM/Ollama). It screenshots → decides → acts → repeats (reasoning models
-and streaming backends are handled), honoring the money guard. For a free 2-step
+and streaming backends are handled), honoring the approval gate. For a free 2-step
 setup or a cheap→fallback chain, pass multiple models — see `VisionConfig.models`.
 
 > **Model notes.** Capability varies by model — some are faster, some more capable,
@@ -83,8 +82,6 @@ bridge: http://localhost:7878/call   model: qwen2.5-vl-7b-instruct
 [04] click    conf=0.88  local/qwen2.5-vl-7b-instruct   470ms  $0  :: Profile menu opened; click "My profile".
 [05] done     conf=1.00  local/qwen2.5-vl-7b-instruct   300ms  $0  :: Profile page is open; task complete.
 ```
-
-Point it at a money-moving control and the guard stops it cold — `done :: money_action_requires_human` — no click is ever dispatched.
 
 > 📹 A screenshot/GIF walkthrough is coming. Until then, the Quickstart above gets you running in ~2 minutes.
 
@@ -171,7 +168,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
 | Path          | What it is                                                            |
 |---------------|-----------------------------------------------------------------------|
-| `extension/`  | MV3 Chrome extension — the executor (CDP trusted input, DOM reads, money guard, `browser_id`). |
+| `extension/`  | MV3 Chrome extension — the executor (CDP trusted input, DOM reads, `browser_id`). |
 | `bridge/`     | FastAPI bridge — multiplexed executor registry, swarm spawn/close, optional credential vault. |
 | `vision/`     | Optional tiered LLM decision layer (`decide_action`) for the bring-your-own-key mode. |
 | `examples/`   | Minimal reference scripts, including the BYO-key agent loop.          |

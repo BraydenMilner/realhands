@@ -35,16 +35,19 @@ A Manifest V3 extension whose service worker attaches to the active tab via
   many browsers. The id can be set in the popup or learned automatically from a
   `/register?browser_id=...` URL the bridge opens when spawning a browser.
 
-### Money guard (safe by default)
+### Configurable approval gate
 
-Before any click or keystroke, the executor checks the *target* (its visible label /
-nearby text / the page intent) against a canonical set of money-moving tokens —
-`redeem`, `redemption`, `deposit`, `withdraw`, `withdrawal`, `transfer`, `cashout`,
-`cash out`, `cashier`, `payout`. If a match is found, the action is **refused**
-(fail-closed): blind coordinate clicks and blind Enter presses are blocked too, so
-the agent can't sidestep it by not naming the target. Moving money is a human's job;
-the agent surfaces state and stops. This guard is enforced redundantly in the
-extension, the bridge, and the vision tier.
+Before any actuating action (click/type/navigate/scroll), the agent loop checks
+the configured **autonomy mode**:
+
+- **`ask`** — pause before every actuating action; requires explicit human approval.
+- **`gated`** (default) — run on its own but **pause for approval on high-risk actions**
+  (payments, sending/publishing, deleting data, entering credentials) as flagged by
+  the model's `sensitive` field. Once approved, subsequent sensitive actions run
+  without re-prompting for the rest of the run.
+- **`auto`** — full autonomy, never pauses.
+
+The human decides their own risk tolerance; the tool does not restrict use.
 
 ## 2. Bridge (`bridge/`) — multiplexed control plane
 
@@ -82,8 +85,9 @@ a `[dx, dy]` delta; `ask_user` carries a question for the human in `text`; `zoom
 the `[cx, cy]` point to inspect closer — the next screenshot is a cropped and enlarged
 close-up of that region so weak models can read small text or pinpoint small targets. It is built
 to route across tiers — a fast local (OpenAI-compatible) model first, escalating to a
-stronger hosted model only when confidence is low — and it applies the same money guard
-before returning.
+stronger hosted model only when confidence is low. Each decision carries a `sensitive`
+boolean flag set by the model for consequential/irreversible actions (payments,
+sending/publishing, deleting, credentials), used by the `gated` approval mode.
 
 Confidence gates the **actuating** actions (`click`/`type`/`navigate`): a below-threshold
 decision escalates and ultimately aborts (`needs_review`). The **safe non-actuating**

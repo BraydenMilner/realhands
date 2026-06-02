@@ -43,6 +43,7 @@ class ActionDecision(BaseModel):
     cost_usd: Optional[float] = None
     duration_ms: int
     escalations: list[dict] = Field(default_factory=list)
+    sensitive: bool = False
 
 
 class StepHistoryItem(BaseModel):
@@ -111,26 +112,6 @@ class VisionConfig(BaseModel):
 
     audit_path: Optional[str] = None
     screenshot_dir: Optional[str] = None
-
-    # Money-action guardrail — if task_context or page_url contains any of these
-    # tokens (case-insensitive), short-circuit to action=done. The runtime NEVER
-    # clicks money-moving controls; a human does.
-    # CANONICAL MONEY TOKENS — keep this list in sync with the copies in
-    # decide.py, prompts.py, and the extension's background.js.
-    high_stakes_actions: set[str] = Field(
-        default_factory=lambda: {
-            "redeem",
-            "redemption",
-            "deposit",
-            "withdraw",
-            "withdrawal",
-            "transfer",
-            "cashout",
-            "cash out",
-            "cashier",
-            "payout",
-        }
-    )
 
     def resolved_audit_path(self) -> str:
         return self.audit_path or _default_audit_path()
