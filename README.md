@@ -36,20 +36,20 @@ flag (which modern Chrome blocks on the default profile anyway).
   it fails closed when it can't verify a target. (Disabling it requires editing
   the source.)
 
-## Two ways in
+## Quickstart
 
-Pick the door that matches you — a person who wants to *use* an agent, or an
-agent that wants to *drive a browser*.
-
-### 🗣️ Use it yourself — the chat panel
-
-You want an agent, not a coding project. Load the extension, start the bridge
-(double-click `start-mac.command` / `start-windows.bat` — first run installs
-everything), open the **RealHands side panel**, connect any model + key once, and
-type what you want done. It drives your real, logged-in Chrome while you watch —
-and **asks before each action** by default. If it's missing a detail or hits a
-decision you didn't spell out (which account, what time), it **asks you right in
-the chat** and waits for your answer. No terminal, no API wiring.
+1. **Install the extension.** Download the latest release (or clone this repo),
+   open `chrome://extensions`, enable *Developer mode*, click *Load unpacked*,
+   and select the `extension/` folder.
+2. **Start the bridge.** Double-click `start-mac.command` (macOS) or
+   `start-windows.bat` (Windows). First run sets everything up automatically.
+   *(Requires Python 3.10+ — pre-installed on most Macs; on Windows install from
+   [python.org](https://python.org) and check "Add to PATH" during install.)*
+3. **Open the RealHands side panel**, connect any model + your key once, and type
+   a task. It drives your real, logged-in Chrome while you watch — and **asks
+   before each action** by default. If it's missing a detail or hits a decision
+   you didn't spell out (which account, what time), it **asks you right in the
+   chat** and waits for your answer.
 
 Prefer a terminal? The same bring-your-own-key loop runs as a one-liner — any
 model + your key, no router to configure:
@@ -67,15 +67,6 @@ setup or a cheap→fallback chain, pass multiple models — see `VisionConfig.mo
 > drive it, but leans on the clear, spelled-out browser instructions RealHands
 > already sends in its system prompt; bigger models need less hand-holding. Pick
 > what fits your task — RealHands just feeds it the screenshot and runs its decision.
-
-### 🤖 Give it to your agent — the local API
-
-Already have an agent (Claude, GPT, your own script)? Run the bridge and `POST`
-JSON to `http://localhost:7878/call` with `{ "method": …, "params": … }` —
-navigate, click, type, screenshot, scroll, get-page-info, wait-for-url, and more.
-Drive one browser or a whole swarm by `browser_id`. Start at
-**[AGENTS.md](AGENTS.md)**; the full, authoritative schema is served at
-`GET /openapi.json` (FastAPI docs at `/docs`).
 
 ## What a run looks like
 
@@ -95,14 +86,16 @@ bridge: http://localhost:7878/call   model: qwen2.5-vl-7b-instruct
 
 Point it at a money-moving control and the guard stops it cold — `done :: money_action_requires_human` — no click is ever dispatched.
 
-> 📹 A screenshot/GIF walkthrough is coming. Until then, the Quickstart below gets you running in ~2 minutes.
+> 📹 A screenshot/GIF walkthrough is coming. Until then, the Quickstart above gets you running in ~2 minutes.
 
-## Quickstart
+## Developer / API setup
 
-> **Just want the chat panel?** 1) Load the extension (step 1 below). 2) Double-click
-> `start-mac.command` / `start-windows.bat` to start the bridge. 3) Open the
-> **RealHands side panel** from the extension, connect your model + key, and type a
-> task. The steps below are the developer/API path.
+Already have an agent (Claude, GPT, your own script)? Run the bridge and `POST`
+JSON to `http://localhost:7878/call` with `{ "method": …, "params": … }` —
+navigate, click, type, screenshot, scroll, get-page-info, wait-for-url, and more.
+Drive one browser or a whole swarm by `browser_id`. Start at
+**[AGENTS.md](AGENTS.md)**; the full, authoritative schema is served at
+`GET /openapi.json` (FastAPI docs at `/docs`).
 
 1. **Load the extension.** `chrome://extensions` → enable *Developer mode* → *Load
    unpacked* → select the `extension/` folder.
