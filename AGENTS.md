@@ -5,6 +5,27 @@ RealHands extension runs inside the user's Chrome and connects to a local bridge
 at `http://localhost:7878`. You drive the browser by POSTing JSON. No cloud, no
 keys — everything is local.
 
+## Setup — getting a browser to drive
+
+**A human already loaded the extension?** (the consumer path) You're done — the bridge is at
+`http://localhost:7878` and you're driving their real, logged-in Chrome. Skip to the API below.
+
+**Setting up entirely yourself, no human (headless-friendly):**
+```bash
+git clone https://github.com/BraydenMilner/realhands && cd realhands/bridge
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn bridge:app --host 127.0.0.1 --port 7878 &
+```
+Then spawn a fresh browser that already has the extension (auto-downloads Chrome for Testing
+once — no admin, no GUI):
+```
+POST http://localhost:7878/spawn   { "browser_id": "b1" }   →   { "browser_id": "b1", "pid": … }
+```
+Pass `"browser_id": "b1"` in every call below to drive it; close it with
+`POST http://localhost:7878/browsers/b1/close`. (You can't auto-load the extension into a
+human's *existing* Chrome — that's a one-time GUI step for them — but spawned browsers are
+entirely yours.)
+
 ## The one call you need
 
 ```
