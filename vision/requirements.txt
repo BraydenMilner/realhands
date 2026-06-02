@@ -3,3 +3,6 @@ pydantic
 pillow
 pytest
 pytest-asyncio
+ddgs
+trafilatura
+lxml_html_clean

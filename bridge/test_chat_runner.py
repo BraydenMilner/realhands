@@ -5,8 +5,12 @@ sys.modules, litellm is monkeypatched, and the executor is faked. Covers:
 
 1. A plain answer (no tool calls) streams a type:"chat" assistant event.
 2. A tool-call to read_current_page is executed then the model answers.
-3. web_search tool is NOT registered when REALHANDS_SEARCH_API_KEY is unset.
+3. web_search and fetch_url tools are ALWAYS registered (free keyless default).
 4. An exception publishes a role:"error" chat event.
+5. Provider resolution: env vars select the right provider; nothing set → ddg.
+6. DDG search: mocked results and graceful failure.
+7. SearXNG / Tavily / Brave: mocked httpx → parsed results.
+8. fetch_url: mocked httpx + trafilatura → text; fallback to r.jina.ai.
 
 Run from this directory:
     pytest test_chat_runner.py -v
@@ -159,7 +163,14 @@ def clean_state():
 
 @pytest.fixture(autouse=True)
 def _clean_search_env(monkeypatch):
-    monkeypatch.delenv("REALHANDS_SEARCH_API_KEY", raising=False)
+    for var in (
+        "REALHANDS_SEARCH_API_KEY",
+        "REALHANDS_SEARCH_PROVIDER",
+        "REALHANDS_SEARXNG_URL",
+        "REALHANDS_TAVILY_API_KEY",
+        "REALHANDS_BRAVE_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest_asyncio.fixture
@@ -293,12 +304,9 @@ async def test_tool_call_read_page_then_answer(http_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_web_search_not_registered_without_api_key(http_client, monkeypatch):
-    """When REALHANDS_SEARCH_API_KEY is unset, the web_search tool is NOT
-    in the tools list."""
+async def test_web_search_and_fetch_url_always_registered(http_client, monkeypatch):
+    """web_search and fetch_url are ALWAYS in the tools list (free keyless default)."""
     import litellm
-
-    monkeypatch.delenv("REALHANDS_SEARCH_API_KEY", raising=False)
 
     captured_tools = []
 
@@ -320,7 +328,8 @@ async def test_web_search_not_registered_without_api_key(http_client, monkeypatc
     tool_names = [
         t.get("function", {}).get("name") for t in tools if t.get("type") == "function"
     ]
-    assert "web_search" not in tool_names
+    assert "web_search" in tool_names
+    assert "fetch_url" in tool_names
     assert "read_current_page" in tool_names
     assert "view_screenshot" in tool_names
 
@@ -346,3 +355,274 @@ async def test_exception_publishes_error_event(http_client, monkeypatch):
     assert done_events
     assert done_events[0]["role"] == "error"
     assert "broken" in done_events[0]["text"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Provider resolution tests
+# ---------------------------------------------------------------------------
+
+def test_resolve_search_provider_default():
+    import chat_runner
+    assert chat_runner._resolve_search_provider() == "ddg"
+
+
+def test_resolve_search_provider_explicit(monkeypatch):
+    import chat_runner
+    monkeypatch.setenv("REALHANDS_SEARCH_PROVIDER", "tavily")
+    assert chat_runner._resolve_search_provider() == "tavily"
+
+
+def test_resolve_search_provider_searxng(monkeypatch):
+    import chat_runner
+    monkeypatch.setenv("REALHANDS_SEARXNG_URL", "http://localhost:8888")
+    assert chat_runner._resolve_search_provider() == "searxng"
+
+
+def test_resolve_search_provider_tavily(monkeypatch):
+    import chat_runner
+    monkeypatch.setenv("REALHANDS_TAVILY_API_KEY", "tvly-xxx")
+    assert chat_runner._resolve_search_provider() == "tavily"
+
+
+def test_resolve_search_provider_brave(monkeypatch):
+    import chat_runner
+    monkeypatch.setenv("REALHANDS_BRAVE_API_KEY", "brave-xxx")
+    assert chat_runner._resolve_search_provider() == "brave"
+
+
+def test_resolve_search_provider_explicit_overrides_env(monkeypatch):
+    import chat_runner
+    monkeypatch.setenv("REALHANDS_SEARCH_PROVIDER", "searxng")
+    monkeypatch.setenv("REALHANDS_TAVILY_API_KEY", "tvly-xxx")
+    assert chat_runner._resolve_search_provider() == "searxng"
+
+
+# ---------------------------------------------------------------------------
+# DDG search tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ddg_search_returns_results(monkeypatch):
+    import chat_runner
+
+    fake_results = [
+        {"title": "Cats", "href": "https://cats.com", "body": "All about cats"},
+        {"title": "Dogs", "href": "https://dogs.com", "body": "All about dogs"},
+    ]
+
+    monkeypatch.setattr(chat_runner, "_search_ddg", lambda q: fake_results)
+    result = await chat_runner._tool_web_search("pets")
+    assert "Cats" in result
+    assert "https://cats.com" in result
+    assert "Dogs" in result
+
+
+@pytest.mark.asyncio
+async def test_ddg_search_graceful_failure(monkeypatch):
+    import chat_runner
+
+    monkeypatch.setattr(chat_runner, "_search_ddg", lambda q: [])
+    result = await chat_runner._tool_web_search("pets")
+    assert "temporarily unavailable" in result
+    assert "DuckDuckGo" in result
+
+
+@pytest.mark.asyncio
+async def test_ddg_search_exception_graceful(monkeypatch):
+    import chat_runner
+
+    def _boom(q):
+        raise RuntimeError("ddgs TLS error")
+
+    monkeypatch.setattr(chat_runner, "_search_ddg", _boom)
+    result = await chat_runner._tool_web_search("pets")
+    assert "temporarily unavailable" in result
+
+
+# ---------------------------------------------------------------------------
+# SearXNG search tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_searxng_search_returns_results(monkeypatch):
+    import chat_runner
+
+    monkeypatch.setenv("REALHANDS_SEARXNG_URL", "http://localhost:8888")
+
+    fake_data = {
+        "results": [
+            {"title": "SearX Result", "url": "https://sr.com", "content": "snip"},
+        ]
+    }
+
+    class _FakeResp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return fake_data
+
+    def _fake_get(url, **kw):
+        assert "localhost:8888" in url
+        return _FakeResp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setattr(chat_runner, "_resolve_search_provider", lambda: "searxng")
+
+    result = await chat_runner._tool_web_search("test")
+    assert "SearX Result" in result
+    assert "https://sr.com" in result
+
+
+# ---------------------------------------------------------------------------
+# Tavily search tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_tavily_search_returns_results(monkeypatch):
+    import chat_runner
+
+    monkeypatch.setenv("REALHANDS_TAVILY_API_KEY", "tvly-test")
+
+    fake_data = {
+        "results": [
+            {"title": "Tavily Hit", "url": "https://tav.com", "content": "tav snip"},
+        ]
+    }
+
+    class _FakeResp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return fake_data
+
+    def _fake_post(url, **kw):
+        assert "tavily.com" in url
+        return _FakeResp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    monkeypatch.setattr(chat_runner, "_resolve_search_provider", lambda: "tavily")
+
+    result = await chat_runner._tool_web_search("test")
+    assert "Tavily Hit" in result
+    assert "https://tav.com" in result
+
+
+@pytest.mark.asyncio
+async def test_tavily_search_failure_graceful(monkeypatch):
+    import chat_runner
+
+    monkeypatch.setattr(chat_runner, "_resolve_search_provider", lambda: "tavily")
+
+    import httpx
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("timeout")))
+
+    result = await chat_runner._tool_web_search("test")
+    assert "failed" in result.lower() or "tavily" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Brave search tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_brave_search_returns_results(monkeypatch):
+    import chat_runner
+
+    fake_data = {
+        "web": {
+            "results": [
+                {"title": "Brave Hit", "url": "https://brave.com", "description": "brave snip"},
+            ]
+        }
+    }
+
+    class _FakeResp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return fake_data
+
+    def _fake_get(url, **kw):
+        assert "brave.com" in url
+        return _FakeResp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setattr(chat_runner, "_resolve_search_provider", lambda: "brave")
+
+    result = await chat_runner._tool_web_search("test")
+    assert "Brave Hit" in result
+    assert "https://brave.com" in result
+
+
+# ---------------------------------------------------------------------------
+# fetch_url tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fetch_url_returns_text(monkeypatch):
+    import chat_runner
+
+    html = "<html><body><p>Hello from the page</p></body></html>"
+
+    class _FakeResp:
+        status_code = 200
+        text = html
+        def raise_for_status(self):
+            pass
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: _FakeResp())
+
+    result = await chat_runner._tool_fetch_url("https://example.com")
+    assert "Fetched" in result or "Hello from the page" in result
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_fallback_to_jina(monkeypatch):
+    import chat_runner
+
+    call_log = []
+
+    html = "<html><body></body></html>"
+
+    class _EmptyResp:
+        status_code = 200
+        text = html
+        def raise_for_status(self):
+            pass
+
+    class _JinaResp:
+        status_code = 200
+        text = "# Jina markdown content"
+        def raise_for_status(self):
+            pass
+
+    def _fake_get(url, **kw):
+        call_log.append(url)
+        if "r.jina.ai" in url:
+            return _JinaResp()
+        return _EmptyResp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", _fake_get)
+
+    result = await chat_runner._tool_fetch_url("https://example.com")
+    assert "Jina markdown content" in result
+    assert any("r.jina.ai" in u for u in call_log)
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_total_failure_graceful(monkeypatch):
+    import chat_runner
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")))
+
+    result = await chat_runner._tool_fetch_url("https://example.com")
+    assert "Couldn't fetch" in result

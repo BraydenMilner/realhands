@@ -50,7 +50,9 @@ flag (which modern Chrome blocks on the default profile anyway).
    you didn't spell out (which account, what time), it **asks you right in the
    chat** and waits for your answer. Switch to **Ask** mode to get answers about
    the current page (read-only — no clicks or navigation) or search the web
-   without driving the browser.
+   without driving the browser. Web search works free out of the box (DuckDuckGo,
+   best-effort); for reliable search set `REALHANDS_TAVILY_API_KEY` (free 1k/mo)
+   or `REALHANDS_SEARXNG_URL` (self-host). `fetch_url` reads any page (no key).
 
 Prefer a terminal? The same bring-your-own-key loop runs as a one-liner — any
 model + your key, no router to configure:

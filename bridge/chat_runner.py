@@ -2,8 +2,8 @@
 
 Reuses the BYO-key model config (_load_vision / _build_vision_config) but never
 actuates the browser. Tools: read_current_page, view_screenshot, web_search
-(optional, env-gated). Publishes answers over the existing SSE /events stream
-as {type:"chat", ...} events.
+(always registered, free keyless default), fetch_url (always registered).
+Publishes answers over the existing SSE /events stream as {type:"chat", ...} events.
 """
 
 from __future__ import annotations
@@ -19,16 +19,17 @@ log = logging.getLogger("agent_bridge.chat")
 
 _SYSTEM_PROMPT = (
     "You are RealHands, a helpful assistant embedded in the user's browser. "
-    "You can read their current page and search the web to answer questions. "
+    "You can read their current page, search the web, and fetch URLs to answer questions. "
     "Prefer information from the current page when the question is about what's on screen. "
     "Answer concisely."
 )
 
 _MAX_TOOL_ITERATIONS = 5
 _MAX_PAGE_TEXT_CHARS = 6000
+_MAX_FETCH_CHARS = 6000
 
 
-def _build_tools(include_search: bool) -> list[dict]:
+def _build_tools() -> list[dict]:
     tools = [
         {
             "type": "function",
@@ -46,28 +47,216 @@ def _build_tools(include_search: bool) -> list[dict]:
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
-    ]
-    if include_search:
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Search the web for information.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The search query.",
-                            }
-                        },
-                        "required": ["query"],
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web for information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query.",
+                        }
                     },
+                    "required": ["query"],
                 },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "Fetch and extract the text content of a web page URL.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to fetch.",
+                        }
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+    ]
+    return tools
+
+
+def _resolve_search_provider() -> str:
+    explicit = os.environ.get("REALHANDS_SEARCH_PROVIDER", "").lower()
+    if explicit in ("ddg", "searxng", "tavily", "brave"):
+        return explicit
+    if os.environ.get("REALHANDS_SEARXNG_URL"):
+        return "searxng"
+    if os.environ.get("REALHANDS_TAVILY_API_KEY"):
+        return "tavily"
+    if os.environ.get("REALHANDS_BRAVE_API_KEY"):
+        return "brave"
+    return "ddg"
+
+
+def _search_ddg(query: str) -> list[dict]:
+    try:
+        from ddgs import DDGS
+    except Exception:
+        return []
+    with DDGS() as ddgs:
+        return ddgs.text(query, max_results=5)
+
+
+def _search_searxng(query: str) -> list[dict]:
+    import httpx
+
+    base = os.environ.get("REALHANDS_SEARXNG_URL", "").rstrip("/")
+    resp = httpx.get(f"{base}/search", params={"q": query, "format": "json"}, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    out = []
+    for r in data.get("results", [])[:5]:
+        out.append(
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": r.get("content", ""),
             }
         )
-    return tools
+    return out
+
+
+def _search_tavily(query: str) -> list[dict]:
+    import httpx
+
+    api_key = os.environ.get("REALHANDS_TAVILY_API_KEY", "")
+    resp = httpx.post(
+        "https://api.tavily.com/search",
+        json={"api_key": api_key, "query": query, "max_results": 5},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    out = []
+    for r in data.get("results", [])[:5]:
+        out.append(
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": r.get("content", ""),
+            }
+        )
+    return out
+
+
+def _search_brave(query: str) -> list[dict]:
+    import httpx
+
+    api_key = os.environ.get("REALHANDS_BRAVE_API_KEY", "")
+    resp = httpx.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        params={"q": query},
+        headers={"X-Subscription-Token": api_key},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    out = []
+    for r in data.get("web", {}).get("results", [])[:5]:
+        out.append(
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": r.get("description", ""),
+            }
+        )
+    return out
+
+
+_DDGS_GRACEFUL = (
+    "Web search is temporarily unavailable (free DuckDuckGo backend can rate-limit). "
+    "Answer from the page or your own knowledge, or set REALHANDS_TAVILY_API_KEY / "
+    "REALHANDS_SEARXNG_URL for reliable search."
+)
+
+_PROVIDER_GRACEFUL = "Web search failed ({provider}). Answer from the page or your own knowledge."
+
+
+def _format_results(results: list[dict]) -> str:
+    if not results:
+        return "No search results found."
+    parts = []
+    for r in results[:5]:
+        title = r.get("title", "")
+        url = r.get("url", "")
+        snippet = r.get("snippet", "")
+        parts.append(f"- {title}\n  {url}\n  {snippet}")
+    return "\n".join(parts)
+
+
+async def _tool_web_search(query: str) -> str:
+    provider = _resolve_search_provider()
+    try:
+        if provider == "ddg":
+            raw = _search_ddg(query)
+            if not raw:
+                return _DDGS_GRACEFUL
+            results = [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("href") or r.get("url", ""),
+                    "snippet": r.get("body") or r.get("snippet", ""),
+                }
+                for r in raw
+            ]
+            return _format_results(results)
+        elif provider == "searxng":
+            return _format_results(_search_searxng(query))
+        elif provider == "tavily":
+            return _format_results(_search_tavily(query))
+        elif provider == "brave":
+            return _format_results(_search_brave(query))
+        return _format_results([])
+    except Exception:
+        if provider == "ddg":
+            return _DDGS_GRACEFUL
+        return _PROVIDER_GRACEFUL.format(provider=provider)
+
+
+async def _tool_fetch_url(url: str) -> str:
+    import httpx
+
+    try:
+        try:
+            from trafilatura import extract as _trafilatura_extract
+        except Exception:
+            _trafilatura_extract = None
+
+        resp = httpx.get(
+            url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True
+        )
+        resp.raise_for_status()
+        html = resp.text
+
+        if _trafilatura_extract:
+            text = _trafilatura_extract(html)
+            if text:
+                return f"Fetched: {url}\n{text[:_MAX_FETCH_CHARS]}"
+
+        jina_resp = httpx.get(
+            f"https://r.jina.ai/{url}",
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"},
+            follow_redirects=True,
+        )
+        jina_resp.raise_for_status()
+        text = jina_resp.text
+        if text:
+            return f"Fetched: {url}\n{text[:_MAX_FETCH_CHARS]}"
+
+        return "Couldn't fetch that page (it may block bots or require JS)."
+    except Exception:
+        return "Couldn't fetch that page (it may block bots or require JS)."
 
 
 async def _tool_read_current_page(executor) -> str:
@@ -116,38 +305,6 @@ async def _tool_view_screenshot(executor) -> list[dict]:
         return [{"role": "tool", "content": f"Screenshot failed: {exc}"}]
 
 
-async def _tool_web_search(query: str) -> str:
-    import urllib.request
-    import json as _json
-
-    api_key = os.environ.get("REALHANDS_SEARCH_API_KEY", "")
-    if not api_key:
-        return "Web search is not configured."
-    try:
-        payload = _json.dumps(
-            {"api_key": api_key, "query": query, "max_results": 5}
-        ).encode()
-        req = urllib.request.Request(
-            "https://api.tavily.com/search",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read())
-        results = data.get("results", [])
-        if not results:
-            return "No search results found."
-        parts = []
-        for r in results[:5]:
-            title = r.get("title", "")
-            url = r.get("url", "")
-            snippet = r.get("content", "")
-            parts.append(f"- {title}\n  {url}\n  {snippet}")
-        return "\n".join(parts)
-    except Exception as exc:
-        return f"Search failed: {exc}"
-
-
 async def run_chat_turn(
     message: str,
     broker,
@@ -182,8 +339,7 @@ async def run_chat_turn(
     api_key = config.models[0].api_key if config.models else None
     base_url = config.models[0].base_url if config.models else None
 
-    include_search = bool(os.environ.get("REALHANDS_SEARCH_API_KEY"))
-    tools = _build_tools(include_search)
+    tools = _build_tools()
 
     litellm_kwargs: dict[str, Any] = {
         "model": model,
@@ -273,6 +429,8 @@ async def _execute_tool(name: str, arguments_json: str, executor) -> Any:
         return await _tool_view_screenshot(executor)
     elif name == "web_search":
         return await _tool_web_search(args.get("query", ""))
+    elif name == "fetch_url":
+        return await _tool_fetch_url(args.get("url", ""))
     return f"Unknown tool: {name}"
 
 

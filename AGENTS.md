@@ -120,5 +120,8 @@ The answer streams over the existing `GET /events` SSE as `{type:"chat", ...}` e
 - `{type:"chat", role:"assistant", text, done:true}` — the final answer.
 - `{type:"chat", role:"error", text, done:true}` — on failure.
 
-**Web search** (optional): set `REALHANDS_SEARCH_API_KEY` to a [Tavily](https://tavily.com) API key.
-When unset, the agent answers from page content + its own knowledge only.
+**Web search** works **free out of the box** (DuckDuckGo, best-effort — can rate-limit).
+For reliable search set ONE of `REALHANDS_SEARXNG_URL` (self-host),
+`REALHANDS_TAVILY_API_KEY` (free 1k/mo, recommended), or
+`REALHANDS_BRAVE_API_KEY` (paid). Optional `REALHANDS_SEARCH_PROVIDER` to force one
+(`ddg`, `searxng`, `tavily`, `brave`). `fetch_url` reads any page (no key).
