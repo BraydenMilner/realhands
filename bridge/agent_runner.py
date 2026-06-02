@@ -33,8 +33,9 @@ log = logging.getLogger("agent_bridge.agent")
 
 # Actions that actuate the page. In "ask" mode each of these waits for an
 # explicit POST /agent/approve before executing. screenshot / get_page_info are
-# observation-only and never gated.
-_ACTUATING = frozenset({"click", "type", "navigate", "key_press", "scroll"})
+# observation-only and never gated. (The vision ActionType can only emit these;
+# ask_user/wait/done/abort are handled separately and are not gated here.)
+_ACTUATING = frozenset({"click", "type", "navigate", "scroll"})
 
 # Vision-tier ActionType values that END the run (no execution).
 _TERMINAL = frozenset({"done", "abort"})
@@ -106,6 +107,9 @@ class AgentRunner:
           "stop_event": asyncio.Event,   # set by /agent/stop
           "approve_event": asyncio.Event,# set by /agent/approve
           "approved": bool|None,         # the latest approval verdict
+          "reply_event": asyncio.Event,  # set by /agent/reply (ask_user answer)
+          "reply": str|None,             # the latest human answer text
+          "awaiting": None|"approval"|"input",  # what the loop is paused for
         }
     """
 
@@ -148,6 +152,9 @@ class AgentRunner:
             "stop_event": asyncio.Event(),
             "approve_event": asyncio.Event(),
             "approved": None,
+            "reply_event": asyncio.Event(),
+            "reply": None,
+            "awaiting": None,
         }
         self._runs[run_id] = record
 
@@ -171,23 +178,47 @@ class AgentRunner:
         if run_id is None:
             for rec in self._runs.values():
                 rec["stop_event"].set()
-                # Unblock anything waiting on approval so it can observe the stop.
+                # Unblock anything waiting on approval or a reply so it can
+                # observe the stop.
                 rec["approve_event"].set()
+                rec["reply_event"].set()
             return {"stopped": True}
         rec = self._runs.get(run_id)
         if rec is not None:
             rec["stop_event"].set()
             rec["approve_event"].set()
+            rec["reply_event"].set()
         return {"stopped": True}
 
     def approve(self, run_id: str, approved: bool) -> dict:
         """Record the verdict for a run's pending awaiting_approval step and
-        wake the loop. approved=False causes the loop to stop the run."""
+        wake the loop. approved=False causes the loop to stop the run.
+
+        Ignored (ok:false) unless the run is actually paused for approval, so a
+        duplicate/retried POST can't pre-arm the gate for a later step."""
         rec = self._runs.get(run_id)
         if rec is None:
-            return {"ok": False}
+            return {"ok": False, "reason": "unknown_run"}
+        if rec.get("awaiting") != "approval":
+            return {"ok": False, "reason": "not_awaiting"}
         rec["approved"] = bool(approved)
         rec["approve_event"].set()
+        return {"ok": True}
+
+    def reply(self, run_id: str, text: str) -> dict:
+        """Record the human's answer to a run's pending awaiting_input step
+        (an ask_user action) and wake the loop so it can resume.
+
+        Ignored (ok:false) unless the run is actually paused on an ask_user, so a
+        duplicate/retried POST can't pre-arm the wait and auto-answer the NEXT
+        ask_user with a stale value."""
+        rec = self._runs.get(run_id)
+        if rec is None:
+            return {"ok": False, "reason": "unknown_run"}
+        if rec.get("awaiting") != "input":
+            return {"ok": False, "reason": "not_awaiting"}
+        rec["reply"] = text
+        rec["reply_event"].set()
         return {"ok": True}
 
     # ---------- the loop ----------
@@ -293,8 +324,47 @@ class AgentRunner:
                 )
                 break
 
+            # ---- ask_user: pause, ask the human, resume with their answer ----
+            # This is NOT a page-actuating action and has its own gate, so it is
+            # handled before (and independently of) the ask-mode approval gate.
+            if action == "ask_user":
+                question = (
+                    decision.text or decision.reasoning or "The agent needs your input."
+                )
+                rec["awaiting"] = "input"  # set BEFORE publishing so a reply is accepted
+                await self._publish(
+                    run_id=run_id,
+                    step=step,
+                    phase="awaiting_input",
+                    action="ask_user",
+                    message=question,
+                    reasoning=decision.reasoning,
+                )
+                answer = await self._await_reply(run_id, stop_event)
+                if stop_event.is_set():
+                    await self._publish(run_id=run_id, step=step, phase="stopped")
+                    break
+                outcome = f"human answered: {answer}" if answer else "no answer given"
+                await self._publish(
+                    run_id=run_id,
+                    step=step,
+                    phase="acted",
+                    action="ask_user",
+                    message=outcome,
+                )
+                history.append(
+                    StepHistoryItem(
+                        action="ask_user",
+                        target=question,
+                        outcome=outcome,
+                        at=time.strftime("%H:%M:%S"),
+                    )
+                )
+                continue
+
             # ---- ask-gate before any actuating action ----
             if mode == "ask" and action in _ACTUATING:
+                rec["awaiting"] = "approval"  # set BEFORE publishing
                 await self._publish(
                     run_id=run_id,
                     step=step,
@@ -354,19 +424,47 @@ class AgentRunner:
             return False
         approve_event: asyncio.Event = rec["approve_event"]
         await approve_event.wait()
+        # Atomic cleanup (no await before return): clearing awaiting here means a
+        # duplicate /agent/approve that lands afterward is rejected as not_awaiting.
         approve_event.clear()
+        rec["awaiting"] = None
         if stop_event.is_set():
             return False
         return bool(rec.get("approved"))
+
+    async def _await_reply(self, run_id: str, stop_event: asyncio.Event) -> str:
+        """Block until /agent/reply (or /agent/stop) fires for this run.
+        Returns the human's answer text; a stop returns ""."""
+        rec = self._runs.get(run_id)
+        if rec is None:
+            return ""
+        reply_event: asyncio.Event = rec["reply_event"]
+        await reply_event.wait()
+        # Atomic cleanup (no await before return): consume the answer and clear
+        # awaiting so a duplicate/stale reply can't pre-arm the NEXT ask_user.
+        reply_event.clear()
+        answer = rec.get("reply") or ""
+        rec["reply"] = None
+        rec["awaiting"] = None
+        if stop_event.is_set():
+            return ""
+        return answer
 
     async def _execute(
         self, executor, decision, dpr: float, stop_event: asyncio.Event
     ) -> str:
         """Run one decision through the executor. Mirrors the reference loop:
-        navigate / click_at{x,y} / type{x,y,text} / wait=sleep / scroll /
-        key_press. Coordinates are SCREENSHOT pixels — divide by the
-        screenshot's device_pixel_ratio to get CSS pixels for the executor."""
+        navigate / click_at{x,y} / type{x,y,text} / scroll{x,y} / wait=sleep.
+        Coordinates are SCREENSHOT pixels — divide by the screenshot's
+        device_pixel_ratio to get CSS pixels for the executor.
+
+        click/type/scroll require coordinates; if a (weak) model omits them we
+        return a recoverable no-op string instead of raising, so one malformed
+        decision is recorded in history and re-prompted rather than killing the
+        loop task."""
         action = decision.action
+        if action in ("click", "type", "scroll") and decision.coordinates is None:
+            return f"{action} skipped: no coordinates"
         if action == "navigate":
             await executor.call("navigate", {"url": decision.text}, timeout=_EXEC_TIMEOUT)
         elif action == "click":
@@ -380,10 +478,6 @@ class AgentRunner:
         elif action == "scroll":
             x, y = _css_coords(decision.coordinates, dpr)
             await executor.call("scroll", {"x": x, "y": y}, timeout=_EXEC_TIMEOUT)
-        elif action == "key_press":
-            await executor.call(
-                "key_press", {"key": decision.text}, timeout=_EXEC_TIMEOUT
-            )
         elif action == "wait":
             # Sleep, but wake early if the run is stopped mid-wait so the loop
             # can exit promptly instead of holding the event loop for 1.5s.

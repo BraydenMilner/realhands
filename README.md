@@ -47,7 +47,9 @@ You want an agent, not a coding project. Load the extension, start the bridge
 (double-click `start-mac.command` / `start-windows.bat` — first run installs
 everything), open the **RealHands side panel**, connect any model + key once, and
 type what you want done. It drives your real, logged-in Chrome while you watch —
-and **asks before each action** by default. No terminal, no API wiring.
+and **asks before each action** by default. If it's missing a detail or hits a
+decision you didn't spell out (which account, what time), it **asks you right in
+the chat** and waits for your answer. No terminal, no API wiring.
 
 Prefer a terminal? The same bring-your-own-key loop runs as a one-liner — any
 model + your key, no router to configure:

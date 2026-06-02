@@ -8,17 +8,22 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-ActionType = Literal["click", "type", "navigate", "wait", "done", "abort"]
+ActionType = Literal[
+    "click", "type", "navigate", "scroll", "wait", "ask_user", "done", "abort"
+]
 
 
 class ActionDecision(BaseModel):
     """The vision tier's single answer for what the executor should do next.
 
     Contract notes:
-    - `coordinates` is (x, y) in screenshot pixels; only set for `click` / `type`.
+    - `coordinates` is (x, y) in screenshot pixels. Set for `click` / `type`
+      (the target point) and for `scroll` (the [dx, dy] delta to scroll, where
+      positive dy scrolls DOWN).
     - `selector_hint` is a free-form description the executor can use to confirm
       the target (NOT a CSS selector).
-    - `text` is set for `type` (what to type) and `navigate` (target URL).
+    - `text` is set for `type` (what to type), `navigate` (target URL), and
+      `ask_user` (the question to put to the human).
     - `model_index` is which configured model produced this (0 = the first/only).
     - `escalations` records prior model attempts so the audit log can replay the
       whole decision chain.

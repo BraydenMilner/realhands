@@ -75,12 +75,24 @@ extension(s):
 ## 3. Vision tier (`vision/`) — optional decision layer
 
 For the bring-your-own-key mode, `decide_action()` takes a screenshot + task context
-+ recent step history and returns a single structured `ActionDecision`
-(`click`/`type`/`navigate`/`wait`/`done`/`abort` with coordinates, a confidence, and
-short reasoning). It is built to route across tiers — a fast local
-(OpenAI-compatible) model first, escalating to a stronger hosted model only when
-confidence is low — and it applies the same money guard before returning. If you
-bring your own agent (mode A), you don't need this layer at all.
++ recent step history and returns a single structured `ActionDecision`. The actions
+are `click` / `type` / `navigate` / `scroll` / `wait` / `ask_user` / `done` / `abort`
+(with coordinates where relevant, a confidence, and short reasoning). `scroll` carries
+a `[dx, dy]` delta; `ask_user` carries a question for the human in `text`. It is built
+to route across tiers — a fast local (OpenAI-compatible) model first, escalating to a
+stronger hosted model only when confidence is low — and it applies the same money guard
+before returning.
+
+Confidence gates the **actuating** actions (`click`/`type`/`navigate`): a below-threshold
+decision escalates and ultimately aborts (`needs_review`). The **safe non-actuating**
+actions (`ask_user`/`scroll`/`wait`) are honored even below threshold — a weak model that
+humbly says "I'm not sure, ask the human" at low confidence must not have its question
+thrown away. If you bring your own agent (mode A), you don't need this layer at all.
+
+When the chat-panel / agent loop runs an `ask_user`, the bridge emits an `awaiting_input`
+SSE event (the question in `message`) and pauses until the human answers via
+`POST /agent/reply {run_id, text}` — the human-in-the-loop counterpart to the
+`awaiting_approval` / `POST /agent/approve` ask-mode gate.
 
 ## Design constraints
 

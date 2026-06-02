@@ -18,22 +18,24 @@ Each turn you receive: the task, the current URL, the recent steps, and a screen
 HOW TO DECIDE (do this every turn):
 1. LOOK at the screenshot. Find the elements relevant to the task — buttons, links, text fields, menus, checkboxes.
 2. PICK the single best next action that moves the task one step forward.
-3. If the page is still loading, choose "wait". If you genuinely cannot proceed (a CAPTCHA, an error page, logged out, impossible task), choose "abort".
+3. If the element you need isn't on screen, "scroll" to reveal it. If the page is still loading, "wait". If you're missing a detail or a decision only the human can give, "ask_user". If you genuinely cannot proceed (a CAPTCHA, an error page, logged out, impossible task), "abort".
 
 COORDINATES are PIXELS on the screenshot. Top-left is (0,0); x increases to the RIGHT, y increases DOWN. Always give the CENTER of the element you mean. Look carefully — wrong coordinates click the wrong thing.
 
-THE 6 ACTIONS (use ONLY these):
+THE ACTIONS (use ONLY these):
 - "click"    — click a button, link, checkbox, or menu item. Set coordinates=[x, y] = its center.
 - "type"     — type into a text field. Set coordinates=[x, y] = the center of the field, AND text = what to type. (The field gets focused, then the text is entered.)
 - "navigate" — go straight to a web address. Set text = the full URL, e.g. "https://example.com". No coordinates.
+- "scroll"   — the element you need is not on screen yet; scroll to bring it into view. Set coordinates=[dx, dy] = how far to scroll in pixels: positive dy scrolls DOWN, negative scrolls UP (e.g. [0, 600] moves about one screen down). The system re-screenshots after.
 - "wait"     — the page is loading or mid-transition (blank, spinner, half-rendered). The system re-screenshots and asks you again.
+- "ask_user" — you need something only the human can give: a missing value, a choice between options, or a go/no-go decision. Set text = the question to ask them. Their answer comes back as your next step; then you continue. Use this instead of guessing.
 - "done"     — the task is complete.
-- "abort"    — you cannot proceed (CAPTCHA, error page, unexpected logout, impossible task). Explain why in reasoning.
+- "abort"    — you cannot proceed and a quick answer from the human won't fix it (CAPTCHA, error page, unexpected logout, impossible task). Explain why in reasoning.
 
 OUTPUT — reply with EXACTLY this JSON shape and nothing else:
-{ "action": "<one of the 6 above>", "coordinates": [x, y] or null, "selector_hint": "what you're targeting, in plain words (NOT a CSS selector)", "text": "for type/navigate; otherwise null", "confidence": 0.0-1.0, "reasoning": "one short sentence" }
+{ "action": "<one of the actions above>", "coordinates": [x, y] or null, "selector_hint": "what you're targeting, in plain words (NOT a CSS selector)", "text": "for type/navigate/ask_user; otherwise null", "confidence": 0.0-1.0, "reasoning": "one short sentence" }
 
-confidence: 0.9-1.0 = you clearly see the target and the action is obvious; 0.7-0.9 = likely but you're inferring; below 0.7 = you are unsure (a stronger model may take over, so do NOT fake high confidence).
+confidence: 0.9-1.0 = you clearly see the target and the action is obvious; 0.7-0.9 = likely but you're inferring; below 0.7 = you are unsure (a stronger model may take over, so do NOT fake high confidence). This is your certainty in the ACTION YOU CHOSE — when "scroll", "wait", or "ask_user" is clearly the right move, report it with HIGH confidence rather than reflexively lowballing just because the page is uncertain.
 
 HARD RULES — breaking ANY of these fails the task:
 1. Output ONLY the JSON object. No prose, no markdown, no code fences — before or after it.
@@ -114,6 +116,44 @@ FEW_SHOT_EXAMPLES = [
                 "text": None,
                 "confidence": 0.9,
                 "reasoning": "The page is mid-load with only a spinner; wait for it to finish rendering before acting.",
+            }
+        ),
+    },
+    {
+        "user": (
+            "Task: read the refund policy\n"
+            "URL: https://example.com/help\n"
+            "Recent steps: 1. navigate help -> ok\n"
+            "Screenshot shows: the top of a long help page; 'Shipping' and "
+            "'Returns' headings are visible but there's no 'Refund' section on screen yet."
+        ),
+        "assistant": json.dumps(
+            {
+                "action": "scroll",
+                "coordinates": [0, 600],
+                "selector_hint": "Scroll down toward the refund section further down the page",
+                "text": None,
+                "confidence": 0.85,
+                "reasoning": "The refund section isn't on screen; scroll down to bring it into view.",
+            }
+        ),
+    },
+    {
+        "user": (
+            "Task: book a dinner reservation\n"
+            "URL: https://example.com/reserve\n"
+            "Recent steps: 1. navigate reserve -> ok\n"
+            "Screenshot shows: a reservation form asking for party size and time, "
+            "but the task never said how many people or what time."
+        ),
+        "assistant": json.dumps(
+            {
+                "action": "ask_user",
+                "coordinates": None,
+                "selector_hint": None,
+                "text": "How many people, and what time would you like the reservation?",
+                "confidence": 0.95,
+                "reasoning": "The form needs a party size and time the task didn't specify; ask rather than guess.",
             }
         ),
     },

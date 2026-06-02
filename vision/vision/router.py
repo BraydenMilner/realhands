@@ -49,6 +49,16 @@ MONEY_TOKENS = frozenset(
 )
 
 
+# Safe, non-actuating control actions. These never touch the page in a way that
+# matters (scroll/wait) or are themselves the human-in-the-loop (ask_user), so we
+# HONOR them regardless of confidence instead of discarding a low-confidence one
+# and aborting the run. Otherwise a weak model that (correctly, humbly) says "I'm
+# not sure — ask the human" at 0.5 confidence gets its question thrown away and
+# the run aborts, which defeats the whole point of ask_user/scroll for weak models.
+# Actuating actions (click/type/navigate) stay gated by confidence_threshold.
+_ALWAYS_HONOR = frozenset({"ask_user", "scroll", "wait"})
+
+
 def _contains_money_token(*values: Optional[str]) -> bool:
     for value in values:
         if not value:
@@ -297,7 +307,9 @@ async def route(
         confidence = float(parsed.get("confidence", 0.0))
         last = (parsed, idx, model_id, cost, duration_ms)
 
-        if confidence >= config.confidence_threshold:
+        # Safe non-actuating controls (ask_user / scroll / wait) are honored even
+        # below threshold — never discard "ask the human" / "scroll" / "wait".
+        if parsed.get("action") in _ALWAYS_HONOR or confidence >= config.confidence_threshold:
             return _to_decision(
                 parsed,
                 model_used=model_id,

@@ -86,6 +86,10 @@ def screenshot() -> tuple[bytes, str, float]:
 def act(decision: ActionDecision, dpr: float = 1.0) -> str:
     """Execute a decision through the bridge. Returns an outcome string."""
     a = decision.action
+    # click/type/scroll need coordinates; degrade a malformed (weak-model) decision
+    # to a recoverable no-op instead of crashing the loop on a None unpack.
+    if a in ("click", "type", "scroll") and decision.coordinates is None:
+        return f"{a} skipped: no coordinates"
     if a == "navigate":
         call("navigate", {"url": decision.text})
     elif a == "click":
@@ -94,6 +98,16 @@ def act(decision: ActionDecision, dpr: float = 1.0) -> str:
     elif a == "type":
         x, y = decision.coordinates
         call("type", {"x": x / dpr, "y": y / dpr, "text": decision.text})
+    elif a == "scroll":
+        x, y = decision.coordinates
+        call("scroll", {"x": x / dpr, "y": y / dpr})
+    elif a == "ask_user":
+        # Human-in-the-loop: surface the agent's question and feed the answer
+        # back as this step's outcome so the model can use it next turn.
+        question = decision.text or decision.reasoning or "The agent needs your input."
+        print(f"\n  \N{BUST IN SILHOUETTE} {question}")
+        answer = input("  your answer > ").strip()
+        return f"human answered: {answer}" if answer else "no answer given"
     elif a == "wait":
         time.sleep(1.5)
     else:

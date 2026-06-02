@@ -461,3 +461,148 @@ async def test_tool_call_arguments_parsed(tmp_path):
 
     assert decision.action == "type"
     assert decision.model_index == 0
+
+
+# ---------------------------------------------------------------------------
+# 11. New actions: scroll + ask_user round-trip without being mangled.
+# ---------------------------------------------------------------------------
+
+
+def test_action_type_includes_scroll_and_ask_user():
+    """Lock the public action contract: scroll + ask_user are valid actions."""
+    from typing import get_args
+
+    from vision.models import ActionType
+
+    assert {"scroll", "ask_user"} <= set(get_args(ActionType))
+
+
+@pytest.mark.asyncio
+async def test_scroll_passes_through(tmp_path):
+    """A scroll decision keeps its [dx, dy] delta and isn't touched by the money
+    guard (which only intercepts click/type)."""
+    config = _config(tmp_path)
+    payload = {
+        "action": "scroll",
+        "coordinates": [0, 600],
+        "selector_hint": "scroll down to the refund section",
+        "text": None,
+        "confidence": 0.85,
+        "reasoning": "the target is below the fold",
+    }
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="read the refund policy",
+            step_history=[], page_url="https://example.com/help", config=config,
+        )
+
+    assert decision.action == "scroll"
+    assert decision.coordinates == (0, 600)
+
+
+@pytest.mark.asyncio
+async def test_ask_user_passes_through(tmp_path):
+    """An ask_user decision keeps its question in `text` and carries no coords."""
+    config = _config(tmp_path)
+    payload = {
+        "action": "ask_user",
+        "coordinates": None,
+        "selector_hint": None,
+        "text": "Which account should I use?",
+        "confidence": 0.95,
+        "reasoning": "the task didn't say which account",
+    }
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="log in to my account",
+            step_history=[], page_url="https://example.com/login", config=config,
+        )
+
+    assert decision.action == "ask_user"
+    assert decision.text == "Which account should I use?"
+    assert decision.coordinates is None
+
+
+# ---------------------------------------------------------------------------
+# 12. Confidence gating: safe non-actuating actions are HONORED below threshold;
+#     actuating actions (click/type) are still gated -> abort needs_review.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_non_actuating_actions_are_honored(tmp_path):
+    """A weak model that humbly emits ask_user / scroll / wait at LOW confidence
+    must NOT have it discarded into an abort — these are safe, so honor them."""
+    cases = [
+        {"action": "ask_user", "coordinates": None, "selector_hint": None,
+         "text": "Which account?", "confidence": 0.3, "reasoning": "unsure which account"},
+        {"action": "scroll", "coordinates": [0, 500], "selector_hint": "down",
+         "text": None, "confidence": 0.25, "reasoning": "target may be below the fold"},
+        {"action": "wait", "coordinates": None, "selector_hint": None,
+         "text": None, "confidence": 0.2, "reasoning": "page still loading"},
+    ]
+    for i, payload in enumerate(cases):
+        config = _config(tmp_path / f"c{i}")
+
+        async def fake_acompletion(model: str, _p=payload, **kwargs):
+            return _fake_response(_p)
+
+        with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+             patch("vision.router.litellm.completion_cost", return_value=0.0):
+            decision = await decide_action(
+                screenshot=_png_bytes(), task_context="do the task",
+                step_history=[], page_url="https://example.com/x", config=config,
+            )
+        assert decision.action == payload["action"], f"{payload['action']} was discarded"
+        assert decision.reasoning != "needs_review"
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_click_still_aborts(tmp_path):
+    """Actuating actions stay gated: a single low-confidence click is NOT honored
+    — it falls through to abort needs_review."""
+    config = _config(tmp_path)
+    payload = {"action": "click", "coordinates": [10, 10], "selector_hint": "a button",
+               "text": None, "confidence": 0.3, "reasoning": "maybe this one"}
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="click something",
+            step_history=[], page_url="https://example.com/x", config=config,
+        )
+    assert decision.action == "abort"
+    assert decision.reasoning == "needs_review"
+
+
+@pytest.mark.asyncio
+async def test_scroll_negative_delta_passes_through(tmp_path):
+    """scroll up ([0, -600]) round-trips intact — the sign must be preserved."""
+    config = _config(tmp_path)
+    payload = {"action": "scroll", "coordinates": [0, -600], "selector_hint": "up",
+               "text": None, "confidence": 0.8, "reasoning": "go back up"}
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="scroll up",
+            step_history=[], page_url="https://example.com/x", config=config,
+        )
+    assert decision.action == "scroll"
+    assert decision.coordinates == (0, -600)

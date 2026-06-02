@@ -4,9 +4,12 @@
 //   POST /agent/run     {task, browser_id?, max_steps?, mode?}  -> {run_id}
 //   POST /agent/stop    {run_id?}                               -> {stopped:true}
 //   POST /agent/approve {run_id, approved}                      -> {ok:true}
+//   POST /agent/reply   {run_id, text}                          -> {ok:true}
 //   GET  /events        SSE; agent events look like:
 //     {type:"agent", run_id, step, phase, action?, reasoning?,
 //      confidence?, model?, cost_usd?, message?}
+//   The "awaiting_input" phase means the agent ran an ask_user action: it put a
+//   question (in `message`) to the human and is waiting for POST /agent/reply.
 //
 // Config is read from chrome.storage.local.realhands_state (same place the popup
 // writes it): bridge_url (a ws:// URL), bridge_token, browser_id. We translate
@@ -152,7 +155,7 @@ function addAgentBubble(evt) {
   const phase = evt.phase || "decision";
   let kind = "agent";
   if (phase === "done") kind = "done";
-  else if (phase === "awaiting_approval") kind = "await";
+  else if (phase === "awaiting_approval" || phase === "awaiting_input") kind = "await";
   else if (phase === "error" || phase === "abort") kind = "error";
 
   addBubble(kind, (el) => {
@@ -232,12 +235,77 @@ function setRunActive(active) {
   els.sendBtn.disabled = active;
   els.taskInput.disabled = active;
   els.stopBtn.disabled = !active;
-  if (!active) hideApproval();
+  if (!active) {
+    hideApproval();
+    exitReplyMode();
+  }
+}
+
+// ---------- ask_user (human-in-the-loop) ----------
+//
+// When the agent runs an ask_user action the bridge emits phase:awaiting_input
+// with the question in `message`. We re-open the composer (which Send disables
+// during a run) so the human can type/speak an answer; Send then posts it to
+// /agent/reply instead of starting a new run, and the loop resumes.
+
+let pendingReplyRunId = null;
+
+function enterReplyMode(evt) {
+  pendingReplyRunId = evt.run_id;
+  els.taskInput.disabled = false;
+  els.sendBtn.disabled = false;
+  els.sendBtn.textContent = "Answer";
+  els.taskInput.placeholder = "Type your answer to the agent…";
+  els.taskInput.focus();
+}
+
+function exitReplyMode() {
+  if (!pendingReplyRunId) return;
+  pendingReplyRunId = null;
+  els.sendBtn.textContent = "Send";
+  els.taskInput.placeholder = "Describe a task for the agent…";
+  // If the run is still going, re-lock the composer until it finishes (or asks
+  // again). When the run has ended, setRunActive(false) already re-enabled it.
+  if (runActive) {
+    els.taskInput.disabled = true;
+    els.sendBtn.disabled = true;
+  }
+}
+
+async function sendReply() {
+  const text = els.taskInput.value.trim();
+  if (!text || !pendingReplyRunId) return;
+  const runId = pendingReplyRunId;
+  addUserBubble(text);
+  els.taskInput.value = "";
+  autoSizeTextarea();
+  exitReplyMode(); // run continues; re-lock the composer
+  try {
+    const res = await postJSON("/agent/reply", { run_id: runId, text });
+    // The bridge returns HTTP 200 {ok:false} when the run is gone or not
+    // awaiting input — surface it instead of silently dropping the answer.
+    if (!res || res.ok === false) {
+      addErrorBubble("The agent didn't take that answer — the run may have ended.");
+    }
+  } catch (err) {
+    addErrorBubble(`Could not send answer: ${describeError(err)}`);
+  }
+}
+
+// Send button / Enter dispatch to the right action depending on whether the
+// agent is waiting on an answer.
+function onSend() {
+  if (pendingReplyRunId) sendReply();
+  else sendTask();
 }
 
 async function sendTask() {
   const task = els.taskInput.value.trim();
   if (!task || runActive) return;
+
+  // Clear any stale reply mode left by a previous run (e.g. a lost terminal
+  // event) so this fresh task never dispatches as an answer to an old run.
+  exitReplyMode();
 
   const mode = els.modeCheckbox.checked ? "auto" : "ask";
 
@@ -271,6 +339,10 @@ async function stopRun() {
   try {
     await postJSON("/agent/stop", currentRunId ? { run_id: currentRunId } : {});
     addSystemBubble("Stop requested.");
+    // Free the composer NOW rather than waiting for the round-trip "stopped"
+    // event — if that SSE frame is lost, Stop must still be a real escape
+    // (otherwise a run paused at ask_user would strand the panel in answer mode).
+    setRunActive(false);
   } catch (err) {
     addErrorBubble(`Stop failed: ${describeError(err)}`);
     els.stopBtn.disabled = false;
@@ -300,8 +372,12 @@ async function respondApproval(approved) {
   els.approveBtn.disabled = true;
   els.rejectBtn.disabled = true;
   try {
-    await postJSON("/agent/approve", { run_id: runId, approved });
-    addSystemBubble(approved ? "Approved." : "Rejected — stopping run.");
+    const res = await postJSON("/agent/approve", { run_id: runId, approved });
+    if (!res || res.ok === false) {
+      addErrorBubble("That decision didn't land — the run may have ended.");
+    } else {
+      addSystemBubble(approved ? "Approved." : "Rejected — stopping run.");
+    }
   } catch (err) {
     addErrorBubble(`Approval failed: ${describeError(err)}`);
   } finally {
@@ -361,7 +437,11 @@ function openEventStream() {
 function handleEvent(evt) {
   if (!evt || evt.type !== "agent") return;
   // Only render events for the run we launched from this panel.
-  if (currentRunId && evt.run_id && evt.run_id !== currentRunId) return;
+  // Drop any run-tagged event that isn't this panel's current run — INCLUDING
+  // when we have no current run yet (currentRunId null). Otherwise a stray
+  // awaiting_input from another run could arm reply mode against a run we never
+  // launched, and a Send would post the human's answer to the wrong run.
+  if (evt.run_id && evt.run_id !== currentRunId) return;
 
   updateReadout(evt);
 
@@ -369,6 +449,11 @@ function handleEvent(evt) {
     case "awaiting_approval":
       addAgentBubble(evt);
       showApproval(evt);
+      break;
+    case "awaiting_input":
+      addAgentBubble(evt);
+      addSystemBubble("The agent is asking you something — type your answer below.");
+      enterReplyMode(evt);
       break;
     case "done":
       addAgentBubble(evt);
@@ -482,7 +567,7 @@ function updateModeLabel() {
 
 // ---------- wiring ----------
 
-els.sendBtn.addEventListener("click", sendTask);
+els.sendBtn.addEventListener("click", onSend);
 els.stopBtn.addEventListener("click", stopRun);
 els.approveBtn.addEventListener("click", () => respondApproval(true));
 els.rejectBtn.addEventListener("click", () => respondApproval(false));
@@ -494,7 +579,7 @@ els.taskInput.addEventListener("keydown", (e) => {
   // Enter sends; Shift+Enter inserts a newline.
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    sendTask();
+    onSend();
   }
 });
 

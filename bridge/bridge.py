@@ -207,6 +207,11 @@ class AgentApproveBody(BaseModel):
     approved: bool
 
 
+class AgentReplyBody(BaseModel):
+    run_id: str
+    text: str = ""  # the human's answer to a pending ask_user step.
+
+
 # ---------- app factory ----------
 
 
@@ -629,6 +634,14 @@ async def agent_approve(body: AgentApproveBody) -> JSONResponse:
     approved:true -> the loop executes the action; false -> the run stops."""
     runner: AgentRunner = app.state.agent_runner
     return JSONResponse(runner.approve(body.run_id, body.approved))
+
+
+@app.post("/agent/reply")
+async def agent_reply(body: AgentReplyBody) -> JSONResponse:
+    """Answer a run's pending awaiting_input step (an ask_user action). The text
+    is fed back into the loop's step history and the run resumes."""
+    runner: AgentRunner = app.state.agent_runner
+    return JSONResponse(runner.reply(body.run_id, body.text))
 
 
 @app.post("/credentials/read")

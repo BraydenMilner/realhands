@@ -419,6 +419,244 @@ async def test_ask_mode_reject_stops_run(http_client):
 
 
 @pytest.mark.asyncio
+async def test_ask_user_pauses_for_reply_then_resumes(http_client):
+    """ask_user emits awaiting_input (with the question) and WAITS; /agent/reply
+    feeds the answer and the run resumes to done. No page actuation happens for
+    the ask — only the screenshot observations."""
+    ex = _FakeExecutor()
+    app.state.executors["default"] = ex
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="ask_user", text="Which account?", confidence=0.95),
+        _FakeActionDecision(action="done", reasoning="finished"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "log in", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+
+        first = await col.wait_for(run_id, {"awaiting_input"})
+        ai = next(e for e in first if e["phase"] == "awaiting_input")
+        assert ai.get("message") == "Which account?"
+        assert ai.get("action") == "ask_user"
+        # It must WAIT — only screenshots so far, no click/type/navigate/scroll.
+        assert all(m == "screenshot" for (m, _p) in ex.calls)
+
+        rp = await http_client.post(
+            "/agent/reply", json={"run_id": run_id, "text": "the gold one"}
+        )
+        assert rp.status_code == 200 and rp.json()["ok"] is True
+
+        final = await col.wait_for(run_id, {"acted", "done"})
+
+    acted = [
+        e for e in final if e["phase"] == "acted" and e.get("action") == "ask_user"
+    ]
+    assert acted and "the gold one" in (acted[0].get("message") or "")
+    assert any(e["phase"] == "done" for e in final)
+
+
+@pytest.mark.asyncio
+async def test_scroll_executes_with_dpr(http_client):
+    """A scroll decision reaches the executor's `scroll` method with its delta
+    divided by device_pixel_ratio (dpr=2.0 -> (0,600) becomes (0,300))."""
+    ex = _FakeExecutor()
+    app.state.executors["default"] = ex
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="scroll", coordinates=(0, 600)),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "scroll down", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        await col.wait_for(run_id, {"done"})
+
+    scrolls = [p for (m, p) in ex.calls if m == "scroll"]
+    assert scrolls and scrolls[0] == {"x": 0.0, "y": 300.0}
+
+
+@pytest.mark.asyncio
+async def test_reply_unknown_run_is_noop(http_client):
+    """/agent/reply for a run that doesn't exist returns ok:false, not a crash."""
+    rp = await http_client.post(
+        "/agent/reply", json={"run_id": "does-not-exist", "text": "hi"}
+    )
+    assert rp.status_code == 200 and rp.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_stop_during_awaiting_input(http_client):
+    """Stop while paused at ask_user: stop() unblocks _await_reply, the loop
+    emits phase:stopped and drains, and no page action is dispatched."""
+    ex = _FakeExecutor()
+    app.state.executors["default"] = ex
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="ask_user", text="Which account?", confidence=0.95),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "x", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        await col.wait_for(run_id, {"awaiting_input"})
+        s = await http_client.post("/agent/stop", json={"run_id": run_id})
+        assert s.json()["stopped"] is True
+        events = await col.wait_for(run_id, {"stopped"})
+
+    assert any(e["phase"] == "stopped" for e in events)
+    assert all(m == "screenshot" for (m, _p) in ex.calls)  # no actuation
+    for _ in range(100):
+        if run_id not in app.state.agent_runs:
+            break
+        await asyncio.sleep(0.02)
+    assert run_id not in app.state.agent_runs
+
+
+@pytest.mark.asyncio
+async def test_ask_mode_ask_user_uses_input_gate_not_approval(http_client):
+    """In mode='ask', ask_user emits awaiting_INPUT (resumed by /agent/reply),
+    NOT awaiting_approval — it has its own gate, independent of the ask gate."""
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="ask_user", text="Which one?", confidence=0.9),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "x", "mode": "ask", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        first = await col.wait_for(run_id, {"awaiting_input"})
+        phases = {e["phase"] for e in first}
+        assert "awaiting_input" in phases
+        assert "awaiting_approval" not in phases
+
+        rp = await http_client.post(
+            "/agent/reply", json={"run_id": run_id, "text": "first"}
+        )
+        assert rp.json()["ok"] is True
+        final = await col.wait_for(run_id, {"done"})
+
+    assert any(e["phase"] == "done" for e in final)
+
+
+@pytest.mark.asyncio
+async def test_reply_when_not_awaiting_is_rejected(http_client):
+    """A /agent/reply for a run that isn't paused on an ask_user is rejected
+    (ok:false, not_awaiting) — so a stray/duplicate reply can't pre-arm a later
+    ask_user with a stale answer."""
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(_FakeActionDecision(action="wait"))
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "spin", "mode": "auto", "max_steps": 100}
+        )
+        run_id = r.json()["run_id"]
+        await col.wait_for(run_id, {"start"})
+        await asyncio.sleep(0.05)  # let it settle into the wait loop (awaiting is None)
+
+        rp = await http_client.post(
+            "/agent/reply", json={"run_id": run_id, "text": "stale"}
+        )
+        assert rp.status_code == 200
+        body = rp.json()
+        assert body["ok"] is False and body.get("reason") == "not_awaiting"
+
+        await http_client.post("/agent/stop", json={"run_id": run_id})
+        await col.wait_for(run_id, {"stopped"})
+
+
+@pytest.mark.asyncio
+async def test_ask_user_answer_reaches_model_history(http_client):
+    """The human's answer must land in the step_history passed to the NEXT
+    decide_action call, not merely the SSE 'acted' event."""
+    app.state.executors["default"] = _FakeExecutor()
+    captured: list = []
+    seq = [
+        _FakeActionDecision(action="ask_user", text="Which account?", confidence=0.95),
+        _FakeActionDecision(action="done", reasoning="finished"),
+    ]
+    idx = {"i": 0}
+
+    async def _decide(**kw):
+        captured.append(kw.get("step_history"))
+        i = idx["i"]
+        idx["i"] = min(i + 1, len(seq) - 1)
+        return seq[i]
+
+    _FAKE_VISION.decide_action = _decide
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "log in", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        await col.wait_for(run_id, {"awaiting_input"})
+        await http_client.post(
+            "/agent/reply", json={"run_id": run_id, "text": "the gold one"}
+        )
+        await col.wait_for(run_id, {"done"})
+
+    assert len(captured) >= 2
+    hist = captured[1] or []
+    assert any(
+        getattr(h, "action", None) == "ask_user"
+        and "the gold one" in (getattr(h, "outcome", "") or "")
+        for h in hist
+    ), "the reply did not reach the model's next-step history"
+
+
+@pytest.mark.asyncio
+async def test_two_sequential_ask_users_each_wait(http_client):
+    """Two ask_user steps in one run each pause independently — the second does
+    NOT auto-resume off the first answer (reply_event/awaiting reset between
+    them). This is the regression guard for the stale-reply race."""
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="ask_user", text="Q1", confidence=0.95),
+        _FakeActionDecision(action="ask_user", text="Q2", confidence=0.95),
+        _FakeActionDecision(action="done"),
+    )
+
+    async def _seen_question(col, run_id, q, timeout=5.0):
+        for _ in range(int(timeout / 0.02)):
+            if any(
+                e.get("phase") == "awaiting_input"
+                and e.get("message") == q
+                and e.get("run_id") == run_id
+                for e in col.events
+            ):
+                return True
+            await asyncio.sleep(0.02)
+        return False
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "x", "mode": "auto", "max_steps": 6}
+        )
+        run_id = r.json()["run_id"]
+        assert await _seen_question(col, run_id, "Q1")
+
+        await http_client.post("/agent/reply", json={"run_id": run_id, "text": "A1"})
+        assert await _seen_question(col, run_id, "Q2")
+        # Q2 must be genuinely waiting — the run is NOT done yet.
+        assert not any(e.get("phase") == "done" for e in col.events)
+
+        await http_client.post("/agent/reply", json={"run_id": run_id, "text": "A2"})
+        final = await col.wait_for(run_id, {"done"})
+
+    assert any(e["phase"] == "done" for e in final)
+
+
+@pytest.mark.asyncio
 async def test_no_executor_emits_error(http_client):
     """No browser connected -> the loop publishes phase:error and drains."""
     # registry intentionally empty
