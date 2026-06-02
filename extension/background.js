@@ -35,6 +35,8 @@ const state = {
   bridge_url: BRIDGE_URL_DEFAULT,
   bridge_token: "",
   browser_id: BROWSER_ID_DEFAULT,
+  registration_nonce: "",
+  executor_token: "",
   last_event: null,
   current_task: null,
 };
@@ -378,12 +380,19 @@ const BG_HANDLERS = {
     if (!key) throw makeError("invalid_params", "key_press requires key");
     const tab = await resolveTab({ tab_id });
     const isActuating = key === "Enter" || key === " " || key === "Spacebar" || key === "Space" || key === "NumpadEnter";
+    const focusesTarget = !!target_selector;
     // Space and NumpadEnter also activate a focused button, so they require
     // money-target verification and must fail closed when the focused element
     // can't be read, just like Enter.
     if (target_selector) {
       const desc = await describeTarget(tab.id, "describe_element", { selector: target_selector });
-      if (textIsMoneyAction(target_selector, desc.text, isActuating ? tab.url : null)) {
+      if (!desc.ok) {
+        throw makeError(
+          "money_action_unverifiable",
+          `key_press refused: cannot read ${target_selector} to verify it is not a money action`,
+        );
+      }
+      if (textIsMoneyAction(target_selector, desc.text, tab.url)) {
         throw makeError("money_action_blocked", `key_press refused (money action): ${target_selector}`);
       }
     } else if (isActuating) {
@@ -397,6 +406,9 @@ const BG_HANDLERS = {
       if (textIsMoneyAction(desc.text, tab.url)) {
         throw makeError("money_action_blocked", `key_press refused (money action): ${key}`);
       }
+    }
+    if (focusesTarget && textIsMoneyAction(tab.url)) {
+      throw makeError("money_action_blocked", `key_press refused on money-related page: ${tab.url}`);
     }
     if (target_selector) {
       const box = await contentBox(tab.id, target_selector);
@@ -464,10 +476,7 @@ const CONTENT_METHODS = new Set([
 // ---------- WebSocket lifecycle ----------
 
 function bridgeWsUrlWithToken(rawUrl, token) {
-  if (!token) return rawUrl;
-  const u = new URL(rawUrl);
-  u.searchParams.set("token", token);
-  return u.toString();
+  return rawUrl;
 }
 
 function isLoopbackAutoBridgeUrl(rawUrl) {
@@ -501,13 +510,17 @@ function connect() {
 // changed while the WS is already open, so the bridge re-registers this
 // connection under the new id.
 function sendExecutorReady() {
-  return sendToBridge({
+  const msg = {
     event: "executor_ready",
     browser_id: state.browser_id,
     version: chrome.runtime.getManifest().version,
     user_agent: navigator.userAgent,
     bridge_url: state.bridge_url,
-  });
+  };
+  if (state.registration_nonce) msg.registration_nonce = state.registration_nonce;
+  if (state.executor_token) msg.executor_token = state.executor_token;
+  if (state.bridge_token) msg.bridge_token = state.bridge_token;
+  return sendToBridge(msg);
 }
 
 function onWsOpen() {
@@ -654,6 +667,15 @@ function applySetState(patch, { source = "internal" } = {}) {
       needReconnect = true;
     }
   }
+  if (patch && typeof patch.registration_nonce === "string") {
+    state.registration_nonce = patch.registration_nonce;
+  }
+  if (patch && typeof patch.executor_token === "string") {
+    state.executor_token = patch.executor_token;
+  }
+  if (patch && typeof patch.browser_id === "string") {
+    state.browser_id = (patch.browser_id || "").trim() || BROWSER_ID_DEFAULT;
+  }
   persistState();
   if (needReconnect && ws) {
     try { ws.close(); } catch {}
@@ -664,10 +686,11 @@ function applySetState(patch, { source = "internal" } = {}) {
 // executor_ready so the bridge moves this connection under the new id; otherwise
 // the next connect()/onWsOpen registers it. Used both by the popup (set_browser_id)
 // and by the /register?browser_id= URL-learning path below.
-function applyBrowserId(rawId) {
+function applyBrowserId(rawId, registrationNonce) {
   const id = (rawId || "").trim() || BROWSER_ID_DEFAULT;
   const changed = id !== state.browser_id;
   state.browser_id = id;
+  if (registrationNonce !== undefined) state.registration_nonce = registrationNonce || "";
   persistState();
   if (ws && ws.readyState === WebSocket.OPEN) {
     sendExecutorReady();
@@ -677,7 +700,8 @@ function applyBrowserId(rawId) {
   return changed;
 }
 
-// If a localhost URL is a /register?browser_id=<ID> page, return <ID>; else null.
+// If a localhost URL is a /register?browser_id=<ID> page, return the registration
+// details; else null.
 // This is how a SPAWNED Chrome self-identifies: it is launched at the bridge's
 // /register URL, and the service worker reads the id off the tab URL here.
 // (A content script can't do this — content_scripts only match https://*/*, so
@@ -694,7 +718,8 @@ function browserIdFromRegisterUrl(rawUrl) {
   if (u.hostname !== "localhost" && u.hostname !== "127.0.0.1") return null;
   if (u.pathname !== "/register") return null;
   const id = u.searchParams.get("browser_id");
-  return id ? id.trim() : null;
+  const nonce = u.searchParams.get("nonce") || "";
+  return id && nonce ? { id: id.trim(), nonce } : null;
 }
 
 // ---------- message routing (popup + content events) ----------
@@ -769,7 +794,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // adopt <ID> as our browser_id and (re)register with the bridge under it.
   const learnedId = browserIdFromRegisterUrl(changeInfo.url || tab.url);
   if (learnedId) {
-    applyBrowserId(learnedId);
+    applyBrowserId(learnedId.id, learnedId.nonce);
   }
 
   sendToBridge({
@@ -810,6 +835,8 @@ chrome.storage.local.get("realhands_state").then(async ({ realhands_state }) => 
   if (realhands_state?.bridge_url) state.bridge_url = realhands_state.bridge_url;
   if (typeof realhands_state?.bridge_token === "string") state.bridge_token = realhands_state.bridge_token;
   if (realhands_state?.browser_id) state.browser_id = realhands_state.browser_id;
+  if (typeof realhands_state?.registration_nonce === "string") state.registration_nonce = realhands_state.registration_nonce;
+  if (typeof realhands_state?.executor_token === "string") state.executor_token = realhands_state.executor_token;
   // Swarm self-identification on startup: a spawned Chrome is launched at the
   // bridge's /register?browser_id=<ID> URL, which may have finished loading
   // BEFORE this service worker (and its onUpdated listener below) started — so
@@ -819,7 +846,8 @@ chrome.storage.local.get("realhands_state").then(async ({ realhands_state }) => 
     for (const t of tabs) {
       const learnedId = browserIdFromRegisterUrl(t.url) || browserIdFromRegisterUrl(t.pendingUrl);
       if (learnedId) {
-        state.browser_id = learnedId;
+        state.browser_id = learnedId.id;
+        state.registration_nonce = learnedId.nonce || "";
         persistState();
         break;
       }

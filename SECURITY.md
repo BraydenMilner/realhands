@@ -23,7 +23,7 @@ controls. On shared or multi-user hosts, set `REALHANDS_BRIDGE_TOKEN`.
 When `REALHANDS_BRIDGE_TOKEN` is set:
 
 - REST calls require `X-RealHands-Token: <token>`.
-- The extension WebSocket handshake includes `?token=<token>`.
+- The extension sends the token inside the first `executor_ready` WebSocket message.
 - Missing or wrong tokens are rejected.
 
 When the token is unset, localhost workflows remain compatible and the bridge logs
@@ -32,8 +32,9 @@ a startup warning. The token is a bearer secret; store it like a password.
 ## WebSocket Origin Checks
 
 The executor WebSocket rejects normal `http://` and `https://` web origins. It
-accepts absent or `null` origins and Chrome extension origins so that a hostile web
-page cannot directly open `ws://localhost:7878/` and speak the executor protocol.
+accepts absent origins and Chrome extension origins, but rejects opaque `Origin:
+null` pages so that a hostile web page cannot directly open `ws://localhost:7878/`
+and speak the executor protocol.
 
 ## Vault API
 

@@ -13,15 +13,17 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -68,7 +70,7 @@ def _warn_if_running_without_auth() -> None:
 
 
 def _ws_origin_allowed(origin: Optional[str]) -> bool:
-    if origin is None or origin == "" or origin == "null":
+    if origin is None or origin == "":
         return True
     return origin.startswith("chrome-extension://")
 
@@ -194,8 +196,8 @@ class SpawnBody(BaseModel):
 class AgentRunBody(BaseModel):
     task: str
     browser_id: Optional[str] = None
-    max_steps: int = 25
-    mode: str = "ask"  # "ask" gates each actuating step; "auto" never waits.
+    max_steps: int = Field(default=25, ge=1, le=100)
+    mode: Literal["ask", "auto"] = "ask"  # "ask" gates actuating steps.
 
 
 class AgentStopBody(BaseModel):
@@ -205,11 +207,13 @@ class AgentStopBody(BaseModel):
 class AgentApproveBody(BaseModel):
     run_id: str
     approved: bool
+    await_id: Optional[str] = None
 
 
 class AgentReplyBody(BaseModel):
     run_id: str
     text: str = ""  # the human's answer to a pending ask_user step.
+    await_id: Optional[str] = None
 
 
 # ---------- app factory ----------
@@ -229,6 +233,8 @@ def _init_state(app: FastAPI) -> None:
     # BYO-key agent loop state: run_id -> {task, stop_event, approve_event,
     # approved}. The AgentRunner owns these; endpoints below drive it.
     app.state.agent_runs = {}
+    app.state.spawn_nonces = {}  # nonce -> browser_id for spawned executor auth
+    app.state.executor_tokens = {}  # token -> browser_id for spawned WS reconnects
     app.state.agent_runner = AgentRunner(app)
     app.state.vault = None
     if VaultManager is not None:
@@ -313,6 +319,49 @@ def _state_lifespan_started() -> bool:
     return bool(getattr(app.state, "lifespan_started", False))
 
 
+def _register_spawn_nonce(browser_id: str) -> str:
+    nonce = secrets.token_urlsafe(24)
+    app.state.spawn_nonces[nonce] = browser_id
+    return nonce
+
+
+def _register_executor_token(browser_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    app.state.executor_tokens[token] = browser_id
+    return token
+
+
+def _executor_token_valid(browser_id: str, token: Optional[str]) -> bool:
+    if not token:
+        return False
+    return app.state.executor_tokens.get(str(token)) == browser_id
+
+
+def _spawn_nonce_valid(browser_id: str, nonce: Optional[str]) -> bool:
+    if not nonce:
+        return False
+    return app.state.spawn_nonces.get(nonce) == browser_id
+
+
+def _drop_spawn_nonces(browser_id: str) -> None:
+    nonces: dict[str, str] = app.state.spawn_nonces
+    for nonce, bid in list(nonces.items()):
+        if bid == browser_id:
+            nonces.pop(nonce, None)
+
+
+def _drop_executor_tokens(browser_id: str) -> None:
+    tokens: dict[str, str] = app.state.executor_tokens
+    for token, bid in list(tokens.items()):
+        if bid == browser_id:
+            tokens.pop(token, None)
+
+
+def _drop_spawn_credentials(browser_id: str) -> None:
+    _drop_spawn_nonces(browser_id)
+    _drop_executor_tokens(browser_id)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("agent-bridge starting on 127.0.0.1:7878")
@@ -389,10 +438,7 @@ async def ws_executor(ws: WebSocket) -> None:
         return
 
     token = _bridge_token()
-    if token is not None and ws.query_params.get("token") != token:
-        log.warning("rejecting executor WS with missing/wrong token")
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+    query_token_ok = token is None
 
     await ws.accept()
 
@@ -405,6 +451,25 @@ async def ws_executor(ws: WebSocket) -> None:
     log.info("executor connected from %s (awaiting browser_id)", ws.client)
 
     registered_id: Optional[str] = None
+    nonce_authorized_id: Optional[str] = None
+    executor_token: Optional[str] = None
+
+    async def _reject_invalid_registration() -> None:
+        try:
+            await ws.send_text(
+                json.dumps(
+                    {
+                        "set_state": {
+                            "browser_id": DEFAULT_BROWSER_ID,
+                            "registration_nonce": "",
+                            "executor_token": "",
+                        }
+                    }
+                )
+            )
+        except Exception:
+            pass
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
 
     # MV3 keepalive: send a small message every 15s on THIS connection so the
     # extension's onmessage handler fires, which resets Chrome's service worker
@@ -432,17 +497,92 @@ async def ws_executor(ws: WebSocket) -> None:
     try:
         while True:
             text = await ws.receive_text()
+            ready_msg: Optional[dict[str, Any]] = None
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict) and parsed.get("event") == "executor_ready":
+                    ready_msg = parsed
+            except json.JSONDecodeError:
+                parsed = None
+
+            if ready_msg is not None:
+                ready_id = ready_msg.get("browser_id") or DEFAULT_BROWSER_ID
+                try:
+                    ready_id = _validate_spawn_name(str(ready_id), "browser_id")
+                except ValueError:
+                    log.warning("rejecting executor WS with invalid browser_id=%r", ready_id)
+                    await _reject_invalid_registration()
+                    return
+                if _spawn_nonce_valid(ready_id, ready_msg.get("registration_nonce")):
+                    nonce_authorized_id = ready_id
+            if token is not None and not query_token_ok:
+                if ready_msg is None:
+                    log.warning("rejecting unauthenticated executor WS: non-JSON first message")
+                    await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+                if ready_msg.get("bridge_token") == token:
+                    ready_msg.pop("bridge_token", None)
+                    query_token_ok = True
+                candidate_id = ready_msg.get("browser_id") or DEFAULT_BROWSER_ID
+                candidate_id = _validate_spawn_name(str(candidate_id), "browser_id")
+                executor_token_ok = _executor_token_valid(
+                    candidate_id, ready_msg.get("executor_token")
+                )
+                if executor_token_ok:
+                    executor_token = str(ready_msg.get("executor_token"))
+                spawned_auth_ok = nonce_authorized_id == candidate_id or executor_token_ok
+                if not query_token_ok and not spawned_auth_ok:
+                    log.warning("rejecting executor WS with missing/wrong spawned-executor auth")
+                    await _reject_invalid_registration()
+                    return
+                if not query_token_ok:
+                    nonce_authorized_id = candidate_id
+                query_token_ok = True
+
+            if ready_msg is not None:
+                ready_msg.pop("registration_nonce", None)
+                ready_msg.pop("bridge_token", None)
+                ready_msg.pop("executor_token", None)
+                text = json.dumps(ready_msg)
+
             await executor.on_message(text)
             # After on_message processes an executor_ready, this connection's
             # browser_id is known — (re)register under it.
             current_id = executor.browser_id
             if current_id is not None and current_id != registered_id:
+                try:
+                    current_id = _validate_spawn_name(str(current_id), "browser_id")
+                except ValueError:
+                    log.warning("rejecting executor WS with invalid browser_id=%r", current_id)
+                    await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+                if nonce_authorized_id is not None and current_id != nonce_authorized_id:
+                    log.warning(
+                        "rejecting nonce-authenticated executor id change %s -> %s",
+                        nonce_authorized_id,
+                        current_id,
+                    )
+                    await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
                 # If we previously registered under a different id and still own
                 # that slot, vacate it before taking over the new one.
                 if registered_id is not None:
                     if app.state.executors.get(registered_id) is executor:
                         app.state.executors.pop(registered_id, None)
                 _register_executor(current_id, executor)
+                if nonce_authorized_id == current_id:
+                    if executor_token is None:
+                        executor_token = _register_executor_token(current_id)
+                    try:
+                        await executor.set_state(
+                            {
+                                "registration_nonce": "",
+                                "executor_token": executor_token,
+                            }
+                        )
+                    except Exception:
+                        pass
+                    _drop_spawn_nonces(current_id)
                 registered_id = current_id
     except Exception as exc:
         # WebSocketDisconnect or anything else terminating the receive loop.
@@ -617,6 +757,11 @@ async def agent_run(body: AgentRunBody) -> JSONResponse:
             status_code=503,
             content={"error": "vision deps not installed; pip install -r vision/requirements.txt"},
         )
+    except RuntimeError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "agent_run_conflict", "message": str(exc)}},
+        )
     return JSONResponse({"run_id": run_id})
 
 
@@ -633,7 +778,7 @@ async def agent_approve(body: AgentApproveBody) -> JSONResponse:
     """Approve (or reject) a run's pending awaiting_approval step ("ask" mode).
     approved:true -> the loop executes the action; false -> the run stops."""
     runner: AgentRunner = app.state.agent_runner
-    return JSONResponse(runner.approve(body.run_id, body.approved))
+    return JSONResponse(runner.approve(body.run_id, body.approved, body.await_id))
 
 
 @app.post("/agent/reply")
@@ -641,7 +786,7 @@ async def agent_reply(body: AgentReplyBody) -> JSONResponse:
     """Answer a run's pending awaiting_input step (an ask_user action). The text
     is fed back into the loop's step history and the run resumes."""
     runner: AgentRunner = app.state.agent_runner
-    return JSONResponse(runner.reply(body.run_id, body.text))
+    return JSONResponse(runner.reply(body.run_id, body.text, body.await_id))
 
 
 @app.post("/credentials/read")
@@ -686,10 +831,18 @@ async def register_page(browser_id: Optional[str] = None) -> HTMLResponse:
     under it. No auth, no logic — just a 200 page.
     """
     bid = browser_id or DEFAULT_BROWSER_ID
+    try:
+        bid = _validate_spawn_name(bid, "browser_id")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    safe_bid = html.escape(bid, quote=True)
     return HTMLResponse(
         f"<!doctype html><meta charset=utf-8>"
-        f"<title>realhands</title><body>realhands browser {bid} registered</body>",
+        f"<title>realhands</title><body>realhands browser {safe_bid} registered</body>",
         status_code=200,
+        headers={
+            "Content-Security-Policy": "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'"
+        },
     )
 
 
@@ -710,15 +863,19 @@ async def spawn_browser(body: SpawnBody) -> JSONResponse:
             if body.profile is not None
             else None
         )
+        registration_nonce = _register_spawn_nonce(browser_id)
         result = await spawner.spawn(
             browser_id,
             profile=profile,
             persistent=body.persistent,
             start_url=body.start_url,
+            registration_nonce=registration_nonce,
         )
     except ValueError as exc:
+        _drop_spawn_credentials(browser_id)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        _drop_spawn_credentials(browser_id)
         log.warning("spawn failed for %s: %s", browser_id, exc)
         raise HTTPException(status_code=500, detail=f"spawn failed: {exc}") from exc
     return JSONResponse(result)
@@ -735,6 +892,7 @@ async def _do_close(browser_id: Optional[str]) -> JSONResponse:
     if not browser_id:
         raise HTTPException(status_code=400, detail="browser_id required")
     closed = await spawner.close(browser_id)
+    _drop_spawn_credentials(browser_id)
     return JSONResponse({"closed": bool(closed), "browser_id": browser_id})
 
 

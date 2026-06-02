@@ -350,12 +350,16 @@ async def test_stop_halts_run(http_client):
 async def test_stop_all(http_client):
     """/agent/stop with no run_id stops every live run."""
     app.state.executors["default"] = _FakeExecutor()
+    app.state.executors["other"] = _FakeExecutor()
     _FAKE_VISION.decide_action = _script(_FakeActionDecision(action="wait"))
 
     ids = []
-    for _ in range(2):
+    for browser_id in (None, "other"):
+        body = {"task": "spin", "mode": "auto", "max_steps": 100}
+        if browser_id:
+            body["browser_id"] = browser_id
         r = await http_client.post(
-            "/agent/run", json={"task": "spin", "mode": "auto", "max_steps": 100}
+            "/agent/run", json=body
         )
         ids.append(r.json()["run_id"])
 
@@ -388,7 +392,8 @@ async def test_ask_mode_awaiting_approval_then_approve(http_client):
 
         # It should pause at awaiting_approval and NOT have navigated yet.
         events = await col.wait_for(run_id, {"awaiting_approval"})
-        assert any(e["phase"] == "awaiting_approval" for e in events)
+        approval_evt = next(e for e in events if e["phase"] == "awaiting_approval")
+        assert approval_evt.get("await_id")
         ex = app.state.executors["default"]
         assert not any(m == "navigate" for (m, _p) in ex.calls)
 
@@ -433,6 +438,80 @@ async def test_ask_mode_reject_stops_run(http_client):
 
 
 @pytest.mark.asyncio
+async def test_approval_stale_await_id_rejected(http_client):
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="click", coordinates=(10, 10)),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "click", "mode": "ask", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        await col.wait_for(run_id, {"awaiting_approval"})
+        bad = await http_client.post(
+            "/agent/approve", json={"run_id": run_id, "approved": True, "await_id": "stale"}
+        )
+        assert bad.json() == {"ok": False, "reason": "stale_await_id"}
+        await http_client.post("/agent/stop", json={"run_id": run_id})
+        await col.wait_for(run_id, {"stopped"})
+
+
+@pytest.mark.asyncio
+async def test_invalid_mode_and_max_steps_rejected(http_client):
+    app.state.executors["default"] = _FakeExecutor()
+    bad_mode = await http_client.post(
+        "/agent/run", json={"task": "x", "mode": "oops", "max_steps": 5}
+    )
+    assert bad_mode.status_code == 422
+
+    bad_steps = await http_client.post(
+        "/agent/run", json={"task": "x", "mode": "ask", "max_steps": 101}
+    )
+    assert bad_steps.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_browser_run_conflict(http_client):
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(_FakeActionDecision(action="wait"))
+
+    async with _EventCollector() as col:
+        first = await http_client.post(
+            "/agent/run", json={"task": "spin", "mode": "auto", "max_steps": 100}
+        )
+        assert first.status_code == 200
+        run_id = first.json()["run_id"]
+        await col.wait_for(run_id, {"start"})
+
+        second = await http_client.post(
+            "/agent/run", json={"task": "spin 2", "mode": "auto", "max_steps": 100}
+        )
+        assert second.status_code == 409
+        await http_client.post("/agent/stop", json={"run_id": run_id})
+        await col.wait_for(run_id, {"stopped"})
+
+
+@pytest.mark.asyncio
+async def test_ask_user_secret_question_aborts(http_client):
+    app.state.executors["default"] = _FakeExecutor()
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="ask_user", text="What is your password?", confidence=0.95),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "log in", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        events = await col.wait_for(run_id, {"abort"})
+
+    assert any(e.get("reasoning") == "ask_user_secret_request_blocked" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_ask_user_pauses_for_reply_then_resumes(http_client):
     """ask_user emits awaiting_input (with the question) and WAITS; /agent/reply
     feeds the answer and the run resumes to done. No page actuation happens for
@@ -467,7 +546,8 @@ async def test_ask_user_pauses_for_reply_then_resumes(http_client):
     acted = [
         e for e in final if e["phase"] == "acted" and e.get("action") == "ask_user"
     ]
-    assert acted and "the gold one" in (acted[0].get("message") or "")
+    assert acted and "the gold one" not in (acted[0].get("message") or "")
+    assert "[REDACTED]" in (acted[0].get("message") or "")
     assert any(e["phase"] == "done" for e in final)
 
 
@@ -589,9 +669,8 @@ async def test_reply_when_not_awaiting_is_rejected(http_client):
 
 
 @pytest.mark.asyncio
-async def test_ask_user_answer_reaches_model_history(http_client):
-    """The human's answer must land in the step_history passed to the NEXT
-    decide_action call, not merely the SSE 'acted' event."""
+async def test_ask_user_answer_reaches_model_history_redacted(http_client):
+    """The human's answer reaches next-step history only after redaction."""
     app.state.executors["default"] = _FakeExecutor()
     captured: list = []
     seq = [
@@ -615,7 +694,7 @@ async def test_ask_user_answer_reaches_model_history(http_client):
         run_id = r.json()["run_id"]
         await col.wait_for(run_id, {"awaiting_input"})
         await http_client.post(
-            "/agent/reply", json={"run_id": run_id, "text": "the gold one"}
+            "/agent/reply", json={"run_id": run_id, "text": "password hunter2"}
         )
         await col.wait_for(run_id, {"done"})
 
@@ -623,9 +702,10 @@ async def test_ask_user_answer_reaches_model_history(http_client):
     hist = captured[1] or []
     assert any(
         getattr(h, "action", None) == "ask_user"
-        and "the gold one" in (getattr(h, "outcome", "") or "")
+        and "hunter2" not in (getattr(h, "outcome", "") or "")
+        and "[REDACTED]" in (getattr(h, "outcome", "") or "")
         for h in hist
-    ), "the reply did not reach the model's next-step history"
+    ), "the redacted reply did not reach the model's next-step history"
 
 
 @pytest.mark.asyncio

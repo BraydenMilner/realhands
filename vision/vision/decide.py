@@ -41,12 +41,43 @@ MONEY_TOKENS = frozenset(
 
 # URL query-param names whose VALUES may carry secrets — scrubbed before audit.
 _SENSITIVE_QUERY_KEYS = frozenset(
-    {"token", "auth", "access_token", "key", "sig", "code", "magic"}
+    {
+        "token",
+        "auth",
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "key",
+        "api_key",
+        "apikey",
+        "secret",
+        "sig",
+        "signature",
+        "code",
+        "magic",
+        "session",
+        "jwt",
+    }
 )
 
 # Match http(s) URLs embedded anywhere in a string so we can scrub each one
 # without disturbing the surrounding free text. Stops at whitespace.
 _URL_IN_TEXT = re.compile(r"https?://\S+", re.IGNORECASE)
+_BEARER_TOKEN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_SECRET_LABEL_VALUE = re.compile(
+    r"\b("
+    r"password|passwd|pwd|passcode|pin|otp|totp|mfa|2fa|cvv|"
+    r"api[_-]?key|secret|token|access[_-]?token|refresh[_-]?token|"
+    r"id[_-]?token|session|jwt|authorization"
+    r")\b\s*[:=]\s*(?!//)([^\s,;]+)",
+    re.IGNORECASE,
+)
+_PASSWORD_WORD_VALUE = re.compile(
+    r"\b(password|passwd|pwd|passcode|pin|otp|totp|mfa|2fa|cvv)\b\s+(\S+)",
+    re.IGNORECASE,
+)
+_OPENAI_STYLE_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{10,}\b")
 
 
 def _scrub_url(value: str) -> str:
@@ -66,16 +97,53 @@ def _scrub_single_url(url: str) -> str:
         parts = urlsplit(url)
     except (ValueError, TypeError):
         return url
-    if not parts.query:
-        return url
-    pairs = parse_qsl(parts.query, keep_blank_values=True)
-    if not any(k.lower() in _SENSITIVE_QUERY_KEYS for k, _ in pairs):
-        return url
-    scrubbed = [
-        (k, "[REDACTED]" if k.lower() in _SENSITIVE_QUERY_KEYS else v)
-        for k, v in pairs
-    ]
-    return urlunsplit(parts._replace(query=urlencode(scrubbed)))
+    query = parts.query
+    if query:
+        pairs = parse_qsl(query, keep_blank_values=True)
+        if any(k.lower() in _SENSITIVE_QUERY_KEYS for k, _ in pairs):
+            query = urlencode(
+                [
+                    (k, "[REDACTED]" if k.lower() in _SENSITIVE_QUERY_KEYS else v)
+                    for k, v in pairs
+                ]
+            )
+    fragment = ""
+    if parts.fragment:
+        fragment_pairs = parse_qsl(parts.fragment, keep_blank_values=True)
+        if fragment_pairs:
+            if any(k.lower() in _SENSITIVE_QUERY_KEYS for k, _ in fragment_pairs):
+                fragment = urlencode(
+                    [
+                        (k, "[REDACTED]" if k.lower() in _SENSITIVE_QUERY_KEYS else v)
+                        for k, v in fragment_pairs
+                    ]
+                )
+            else:
+                fragment = parts.fragment
+        else:
+            fragment = "[REDACTED]"
+    return urlunsplit(parts._replace(query=query, fragment=fragment))
+
+
+def _scrub_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    out = _scrub_url(value)
+    out = _BEARER_TOKEN.sub("Bearer [REDACTED]", out)
+    out = _OPENAI_STYLE_KEY.sub("[REDACTED]", out)
+    out = _SECRET_LABEL_VALUE.sub(lambda m: f"{m.group(1)}=[REDACTED]", out)
+    out = _PASSWORD_WORD_VALUE.sub(lambda m: f"{m.group(1)} [REDACTED]", out)
+    return out
+
+
+def _scrub_decision_value(value):
+    if isinstance(value, str):
+        return _scrub_text(value)
+    if isinstance(value, list):
+        return [_scrub_decision_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _scrub_decision_value(v) for k, v in value.items()}
+    return value
 
 
 def _detect_money_action(
@@ -108,10 +176,10 @@ def _redacted_decision_dump(decision: ActionDecision) -> dict:
     """model_dump with the typed `text` redacted for type-actions.
 
     A `type` action's `text` is literally what the executor will key into a
-    field — possibly a password/passcode. We must never persist it to the
-    JSONL audit log. Other action types leave `text` (URL for navigate, etc.).
+    field — possibly a password/passcode. Other text fields are scrubbed for
+    URL tokens and common secret label/value patterns before JSONL persistence.
     """
-    dumped = decision.model_dump()
+    dumped = _scrub_decision_value(decision.model_dump())
     if decision.action == "type" and dumped.get("text") is not None:
         dumped["text"] = "[REDACTED]"
     return dumped
@@ -169,8 +237,8 @@ async def decide_action(
             {
                 "at": now_iso(),
                 "screenshot_sha256": digest,
-                "task_context": _scrub_url(task_context),
-                "page_url": _scrub_url(page_url),
+                "task_context": _scrub_text(task_context),
+                "page_url": _scrub_text(page_url),
                 "history_len": len(step_history),
                 "models": [m.model for m in config.models],
                 "guardrail_triggered": money_hit,
@@ -200,8 +268,8 @@ async def decide_action(
         {
             "at": now_iso(),
             "screenshot_sha256": digest,
-            "task_context": _scrub_url(task_context),
-            "page_url": _scrub_url(page_url),
+            "task_context": _scrub_text(task_context),
+            "page_url": _scrub_text(page_url),
             "history_len": len(history),
             "models": [m.model for m in config.models],
             "guardrail_triggered": None,

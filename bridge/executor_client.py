@@ -10,13 +10,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from redaction import redact_payload
+
 log = logging.getLogger("agent_bridge.executor")
+
+_SAFE_BROWSER_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _validated_browser_id(value: Any) -> str:
+    browser_id = str(value or "default")
+    if not _SAFE_BROWSER_ID_RE.fullmatch(browser_id) or ".." in browser_id:
+        raise ValueError("invalid browser_id")
+    return browser_id
 
 
 class ExecutorError(Exception):
@@ -156,13 +168,14 @@ class ExecutorClient:
             # (event_broker.BUFFER_SIZE) within minutes. Drop it before publish.
             if event_kind in {"keepalive", "heartbeat"}:
                 return
-            self.last_event = msg
+            redacted_msg = redact_payload(msg)
+            self.last_event = redacted_msg
             if event_kind == "executor_ready":
                 self.version = msg.get("version")
                 # SWARM PROTOCOL v1: the registration message carries the
                 # browser_id. A browser with none configured registers as
                 # "default" (BACKWARD COMPATIBLE).
-                self.browser_id = msg.get("browser_id") or "default"
+                self.browser_id = _validated_browser_id(msg.get("browser_id"))
                 self.executor_started_at = time.time()
                 log.info(
                     "executor_ready browser_id=%s version=%s",
@@ -171,7 +184,7 @@ class ExecutorClient:
                 )
             # Tag every emitted event with this connection's browser_id so /events
             # subscribers can demux across a swarm. Don't mutate the caller's dict.
-            await self._broker.publish({**msg, "browser_id": self.browser_id})
+            await self._broker.publish({**redacted_msg, "browser_id": self.browser_id})
             return
 
         # Anything else (echo/ack/etc) is ignored intentionally.

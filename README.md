@@ -142,12 +142,12 @@ Point it at a money-moving control and the guard stops it cold — `done :: mone
 
 - The bridge binds to loopback by default. If you expose it beyond localhost or
   run on a shared machine, set `REALHANDS_BRIDGE_TOKEN`; REST calls must then include
-  `X-RealHands-Token`, and the extension sends the token in its WebSocket handshake.
+  `X-RealHands-Token`, and the extension sends the token in its first WebSocket message.
 - `/credentials/read` is sensitive and disabled by default. Enable it only when
   needed with `REALHANDS_VAULT_API_ENABLED=1`; enabled vault reads require
   `REALHANDS_BRIDGE_TOKEN` plus the matching token header.
 - WebSocket executor connections reject normal web origins and accept only no
-  origin, `null`, or `chrome-extension://...` origins.
+  origin or `chrome-extension://...` origins; opaque `Origin: null` pages are rejected.
 
 ## Permissions
 

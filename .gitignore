@@ -21,3 +21,4 @@ dist/
 
 # Local-only working docs — never publish (contains private context)
 AUDIT-FIXES.md
+AUDIT.md

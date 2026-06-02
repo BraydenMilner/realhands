@@ -23,11 +23,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+
+from redaction import redact_payload, redact_text
 
 log = logging.getLogger("agent_bridge.agent")
 
@@ -49,6 +52,10 @@ _WAIT_SECONDS = 1.5
 _ZOOM_FRACTION = 0.34
 _MIN_CROP = 80
 _MAX_ZOOM_DEPTH = 3
+_SECRET_REQUEST_RE = re.compile(
+    r"\b(password|passwd|pwd|passcode|pin|otp|totp|mfa|2fa|cvv|recovery\s+code)\b",
+    re.IGNORECASE,
+)
 
 
 class VisionUnavailable(Exception):
@@ -114,11 +121,13 @@ class AgentRunner:
           "reply_event": asyncio.Event,  # set by /agent/reply (ask_user answer)
           "reply": str|None,             # the latest human answer text
           "awaiting": None|"approval"|"input",  # what the loop is paused for
+          "await_id": str|None,          # nonce for the pending approval/input.
         }
     """
 
     def __init__(self, app) -> None:
         self._app = app
+        self._browser_locks: dict[str, asyncio.Lock] = {}
 
     # ---------- helpers bound to app.state ----------
 
@@ -131,7 +140,7 @@ class AgentRunner:
         return self._app.state.broker
 
     async def _publish(self, **event) -> None:
-        await self._broker.publish({"type": "agent", **event})
+        await self._broker.publish({"type": "agent", **redact_payload(event)})
 
     # ---------- public API (wired to the endpoints) ----------
 
@@ -150,6 +159,11 @@ class AgentRunner:
         decide_action, VisionConfig, ModelConfig, StepHistoryItem = _load_vision()
         config = _build_vision_config(VisionConfig, ModelConfig)
 
+        resolved_browser_id = self._resolve_run_browser_id(browser_id)
+        for rec in self._runs.values():
+            if rec.get("browser_id") == resolved_browser_id:
+                raise RuntimeError(f"agent run already active for browser_id={resolved_browser_id}")
+
         run_id = uuid.uuid4().hex
         record: dict[str, Any] = {
             "task": None,
@@ -159,6 +173,8 @@ class AgentRunner:
             "reply_event": asyncio.Event(),
             "reply": None,
             "awaiting": None,
+            "await_id": None,
+            "browser_id": resolved_browser_id,
         }
         self._runs[run_id] = record
 
@@ -177,6 +193,22 @@ class AgentRunner:
         record["task"] = loop_task
         return run_id
 
+    def _resolve_run_browser_id(self, browser_id: Optional[str]) -> str:
+        """Resolve omitted browser_id the same way bridge /call does.
+
+        This keeps the per-browser run conflict check aligned with the executor
+        that the run will actually drive: default if connected, else the sole
+        executor, else a stable placeholder when no executor is available yet.
+        """
+        executors = getattr(self._app.state, "executors", {})
+        if browser_id is not None:
+            return browser_id
+        if "default" in executors:
+            return "default"
+        if len(executors) == 1:
+            return next(iter(executors.keys()))
+        return "default"
+
     def stop(self, run_id: Optional[str] = None) -> dict:
         """Signal one run (or all runs) to stop at the next checkpoint."""
         if run_id is None:
@@ -194,7 +226,7 @@ class AgentRunner:
             rec["reply_event"].set()
         return {"stopped": True}
 
-    def approve(self, run_id: str, approved: bool) -> dict:
+    def approve(self, run_id: str, approved: bool, await_id: Optional[str] = None) -> dict:
         """Record the verdict for a run's pending awaiting_approval step and
         wake the loop. approved=False causes the loop to stop the run.
 
@@ -205,11 +237,13 @@ class AgentRunner:
             return {"ok": False, "reason": "unknown_run"}
         if rec.get("awaiting") != "approval":
             return {"ok": False, "reason": "not_awaiting"}
+        if await_id is not None and await_id != rec.get("await_id"):
+            return {"ok": False, "reason": "stale_await_id"}
         rec["approved"] = bool(approved)
         rec["approve_event"].set()
         return {"ok": True}
 
-    def reply(self, run_id: str, text: str) -> dict:
+    def reply(self, run_id: str, text: str, await_id: Optional[str] = None) -> dict:
         """Record the human's answer to a run's pending awaiting_input step
         (an ask_user action) and wake the loop so it can resume.
 
@@ -221,6 +255,8 @@ class AgentRunner:
             return {"ok": False, "reason": "unknown_run"}
         if rec.get("awaiting") != "input":
             return {"ok": False, "reason": "not_awaiting"}
+        if await_id is not None and await_id != rec.get("await_id"):
+            return {"ok": False, "reason": "stale_await_id"}
         rec["reply"] = text
         rec["reply_event"].set()
         return {"ok": True}
@@ -248,10 +284,6 @@ class AgentRunner:
         from bridge import _ResolveError, _resolve_executor  # type: ignore
         from executor_client import ExecutorError  # type: ignore
 
-        await self._publish(
-            run_id=run_id, step=0, phase="start", message=task_text, model=model_name
-        )
-
         try:
             executor = _resolve_executor(browser_id)
         except _ResolveError as exc:
@@ -263,6 +295,59 @@ class AgentRunner:
             )
             self._finish(run_id)
             return
+
+        resolved_browser_id = getattr(executor, "browser_id", None) or browser_id or "default"
+        rec["browser_id"] = resolved_browser_id
+        lock = self._browser_locks.setdefault(resolved_browser_id, asyncio.Lock())
+        if lock.locked():
+            await self._publish(
+                run_id=run_id,
+                step=0,
+                phase="error",
+                message=f"agent_run_conflict: browser_id={resolved_browser_id}",
+            )
+            self._finish(run_id)
+            return
+
+        await self._publish(
+            run_id=run_id,
+            step=0,
+            phase="start",
+            message=redact_text(task_text),
+            model=model_name,
+        )
+
+        async with lock:
+            await self._run_steps(
+                run_id=run_id,
+                rec=rec,
+                stop_event=stop_event,
+                task_text=task_text,
+                max_steps=max_steps,
+                mode=mode,
+                decide_action=decide_action,
+                config=config,
+                StepHistoryItem=StepHistoryItem,
+                executor=executor,
+            )
+
+        self._finish(run_id)
+
+    async def _run_steps(
+        self,
+        *,
+        run_id: str,
+        rec: dict[str, Any],
+        stop_event: asyncio.Event,
+        task_text: str,
+        max_steps: int,
+        mode: str,
+        decide_action,
+        config,
+        StepHistoryItem,
+        executor,
+    ) -> None:
+        from executor_client import ExecutorError  # type: ignore
 
         history: list = []
         view = None
@@ -277,7 +362,7 @@ class AgentRunner:
                 shot = await executor.call("screenshot", {}, timeout=_EXEC_TIMEOUT)
             except ExecutorError as exc:
                 await self._publish(
-                    run_id=run_id, step=step, phase="error", message=str(exc)
+                    run_id=run_id, step=step, phase="error", message=redact_text(str(exc))
                 )
                 break
 
@@ -307,7 +392,7 @@ class AgentRunner:
                 )
             except Exception as exc:  # noqa: BLE001 — surface decide failures.
                 await self._publish(
-                    run_id=run_id, step=step, phase="error", message=str(exc)
+                    run_id=run_id, step=step, phase="error", message=redact_text(str(exc))
                 )
                 break
 
@@ -341,12 +426,24 @@ class AgentRunner:
                 question = (
                     decision.text or decision.reasoning or "The agent needs your input."
                 )
+                if _SECRET_REQUEST_RE.search(question):
+                    await self._publish(
+                        run_id=run_id,
+                        step=step,
+                        phase="abort",
+                        action="ask_user",
+                        reasoning="ask_user_secret_request_blocked",
+                    )
+                    break
+                await_id = uuid.uuid4().hex
                 rec["awaiting"] = "input"  # set BEFORE publishing so a reply is accepted
+                rec["await_id"] = await_id
                 await self._publish(
                     run_id=run_id,
                     step=step,
                     phase="awaiting_input",
                     action="ask_user",
+                    await_id=await_id,
                     message=question,
                     reasoning=decision.reasoning,
                 )
@@ -354,7 +451,8 @@ class AgentRunner:
                 if stop_event.is_set():
                     await self._publish(run_id=run_id, step=step, phase="stopped")
                     break
-                outcome = f"human answered: {answer}" if answer else "no answer given"
+                outcome = "human answered: [REDACTED]" if answer else "no answer given"
+                history_outcome = f"human answered: {redact_text(answer)}" if answer else outcome
                 await self._publish(
                     run_id=run_id,
                     step=step,
@@ -366,7 +464,7 @@ class AgentRunner:
                     StepHistoryItem(
                         action="ask_user",
                         target=question,
-                        outcome=outcome,
+                        outcome=history_outcome,
                         at=time.strftime("%H:%M:%S"),
                     )
                 )
@@ -393,14 +491,22 @@ class AgentRunner:
 
             # ---- ask-gate before any actuating action ----
             if mode == "ask" and action in _ACTUATING:
+                await_id = uuid.uuid4().hex
                 rec["awaiting"] = "approval"  # set BEFORE publishing
+                rec["await_id"] = await_id
                 await self._publish(
                     run_id=run_id,
                     step=step,
                     phase="awaiting_approval",
                     action=action,
+                    await_id=await_id,
                     reasoning=decision.reasoning,
                     confidence=decision.confidence,
+                    selector_hint=decision.selector_hint,
+                    coordinates=decision.coordinates,
+                    text=redact_text(decision.text) if decision.action == "navigate" else (
+                        "[REDACTED]" if decision.action == "type" and decision.text else None
+                    ),
                 )
                 approved = await self._await_approval(run_id, stop_event)
                 if stop_event.is_set() or not approved:
@@ -416,7 +522,7 @@ class AgentRunner:
                 outcome = await self._execute(executor, decision, dpr, stop_event)
             except ExecutorError as exc:
                 await self._publish(
-                    run_id=run_id, step=step, phase="error", message=str(exc)
+                    run_id=run_id, step=step, phase="error", message=redact_text(str(exc))
                 )
                 break
 
@@ -444,9 +550,6 @@ class AgentRunner:
                 phase="done",
                 message=f"reached max_steps={max_steps}",
             )
-
-        self._finish(run_id)
-
     # ---------- step mechanics ----------
 
     async def _await_approval(self, run_id: str, stop_event: asyncio.Event) -> bool:
@@ -461,6 +564,7 @@ class AgentRunner:
         # duplicate /agent/approve that lands afterward is rejected as not_awaiting.
         approve_event.clear()
         rec["awaiting"] = None
+        rec["await_id"] = None
         if stop_event.is_set():
             return False
         return bool(rec.get("approved"))
@@ -479,6 +583,7 @@ class AgentRunner:
         answer = rec.get("reply") or ""
         rec["reply"] = None
         rec["awaiting"] = None
+        rec["await_id"] = None
         if stop_event.is_set():
             return ""
         return answer

@@ -40,6 +40,7 @@ import sys
 import tempfile
 import time
 import uuid
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -83,6 +84,33 @@ def _inside_dir(child: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if _current_os() != "Windows":
+        path.chmod(0o700)
+
+
+def _open_private_log(path: Path):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise RuntimeError(f"failed to open spawn log {path}: {exc}") from exc
+    return os.fdopen(fd, "ab", buffering=0)
+
+
+def _validate_extension_dir() -> Path:
+    ext = _EXTENSION_DIR.resolve()
+    manifest = ext / "manifest.json"
+    if not ext.is_dir() or not manifest.is_file():
+        raise RuntimeError(f"extension directory invalid: {ext}")
+    if _current_os() != "Windows" and ext.is_symlink():
+        raise RuntimeError(f"extension directory must not be a symlink: {ext}")
+    return ext
 
 
 def _default_profiles_dir() -> Path:
@@ -211,14 +239,14 @@ class SwarmSpawner:
         self.display = display
         self.xauthority = xauthority if xauthority is not None else _default_xauthority()
         self._browsers: dict[str, dict] = {}
-        self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(self.profiles_dir)
         self.profiles_dir = self.profiles_dir.resolve()
 
-    def _register_url(self, browser_id: str) -> str:
-        return (
-            f"http://localhost:{self.bridge_port}/register"
-            f"?browser_id={browser_id}"
-        )
+    def _register_url(self, browser_id: str, registration_nonce: Optional[str] = None) -> str:
+        params = {"browser_id": browser_id}
+        if registration_nonce:
+            params["nonce"] = registration_nonce
+        return f"http://localhost:{self.bridge_port}/register?{urllib.parse.urlencode(params)}"
 
     def _resolve_launch_binary(self) -> str:
         """Binary used for /spawn. An explicit override wins; otherwise a cached
@@ -236,7 +264,10 @@ class SwarmSpawner:
         self._cft_bin = find_cached_binary() or ensure_chrome_for_testing()
         return self._cft_bin
 
-    def _build_argv(self, user_data_dir: str, browser_id: str) -> list[str]:
+    def _build_argv(
+        self, user_data_dir: str, browser_id: str, registration_nonce: Optional[str] = None
+    ) -> list[str]:
+        extension_dir = _validate_extension_dir()
         argv = [
             self._resolve_launch_binary(),
             f"--user-data-dir={user_data_dir}",
@@ -247,12 +278,12 @@ class SwarmSpawner:
         # tab opens so the service worker self-identifies by browser_id.
         argv.extend(
             (
-                f"--load-extension={_EXTENSION_DIR}",
-                f"--disable-extensions-except={_EXTENSION_DIR}",
+                f"--load-extension={extension_dir}",
+                f"--disable-extensions-except={extension_dir}",
                 "--test-type",
             )
         )
-        argv.append(self._register_url(browser_id))
+        argv.append(self._register_url(browser_id, registration_nonce))
         return argv
 
     def _launch_env(self) -> dict:
@@ -286,6 +317,7 @@ class SwarmSpawner:
         profile: Optional[str] = None,
         persistent: bool = False,
         start_url: Optional[str] = None,
+        registration_nonce: Optional[str] = None,
     ) -> dict:
         if browser_id is None:
             browser_id = self._gen_id()
@@ -301,22 +333,22 @@ class SwarmSpawner:
             profile_path = (self.profiles_dir / name).resolve()
             if not _inside_dir(profile_path, self.profiles_dir):
                 raise ValueError("invalid profile: resolved path escapes profiles_dir")
-            profile_path.mkdir(parents=True, exist_ok=True)
+            _ensure_private_dir(profile_path)
             profile_dir = str(profile_path)
         else:
             profile_dir = tempfile.mkdtemp(prefix=_EPHEMERAL_PREFIX)
+            if _current_os() != "Windows":
+                os.chmod(profile_dir, 0o700)
 
-        argv = self._build_argv(profile_dir, browser_id)
+        argv = self._build_argv(profile_dir, browser_id, registration_nonce)
 
         log_path = self.profiles_dir / f"{browser_id}.log"
         try:
-            log_file = open(log_path, "ab", buffering=0)
-        except OSError as exc:
+            log_file = _open_private_log(log_path)
+        except RuntimeError:
             if not persistent:
                 shutil.rmtree(profile_dir, ignore_errors=True)
-            raise RuntimeError(
-                f"failed to open spawn log {log_path}: {exc}"
-            ) from exc
+            raise
 
         popen_kwargs = self._popen_kwargs()
         popen_kwargs["stdout"] = log_file
@@ -363,6 +395,28 @@ class SwarmSpawner:
 
         pid = info["pid"]
         _kill_process_tree(pid)
+        proc = info.get("popen")
+        if proc is not None:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    if _current_os() == "Windows":
+                        subprocess.call(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         log_file = info.get("log_file")
         if log_file is not None:

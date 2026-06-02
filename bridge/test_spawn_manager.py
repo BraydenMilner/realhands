@@ -355,7 +355,7 @@ def test_init_defaults_match_pins():
 @pytest.mark.asyncio
 async def test_linux_sets_display_env(monkeypatch, fake_popen, tmp_path):
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
-    monkeypatch.setattr(spawn_manager, "_find_chrome_binary", lambda: "/usr/bin/google-chrome")
+    monkeypatch.setattr(spawn_manager, "find_cached_binary", lambda: "/usr/bin/google-chrome")
 
     sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
     await sp.spawn(browser_id="linux1", persistent=True)
@@ -370,7 +370,7 @@ async def test_macos_no_display_env(monkeypatch, fake_popen, tmp_path):
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Darwin")
     monkeypatch.setattr(
         spawn_manager,
-        "_find_chrome_binary",
+        "find_cached_binary",
         lambda: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     )
 
@@ -387,7 +387,7 @@ async def test_windows_no_display_env(monkeypatch, fake_popen, tmp_path):
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Windows")
     monkeypatch.setattr(
         spawn_manager,
-        "_find_chrome_binary",
+        "find_cached_binary",
         lambda: r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     )
 
@@ -539,7 +539,7 @@ def test_kill_tree_windows_dead_process(monkeypatch):
 @pytest.mark.asyncio
 async def test_close_uses_kill_tree_on_linux(monkeypatch, fake_popen, tmp_path):
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
-    monkeypatch.setattr(spawn_manager, "_find_chrome_binary", lambda: "/usr/bin/chrome")
+    monkeypatch.setattr(spawn_manager, "find_cached_binary", lambda: "/usr/bin/chrome")
 
     killpg_calls = []
 
@@ -565,7 +565,7 @@ async def test_close_uses_taskkill_on_windows(monkeypatch, fake_popen, tmp_path)
     monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Windows")
     monkeypatch.setattr(
         spawn_manager,
-        "_find_chrome_binary",
+        "find_cached_binary",
         lambda: r"C:\chrome\chrome.exe",
     )
 
@@ -594,12 +594,19 @@ def test_spawn_argv_force_loads_extension(monkeypatch, tmp_path):
     monkeypatch.setattr(spawn_manager, "find_cached_binary", lambda: "/fake/cft")
     sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
     argv = sp._build_argv(str(tmp_path / "p1"), "swarm-1")
-    ext = str(spawn_manager._EXTENSION_DIR)
+    ext = str(spawn_manager._EXTENSION_DIR.resolve())
     assert argv[0] == "/fake/cft"
     assert f"--load-extension={ext}" in argv
     assert f"--disable-extensions-except={ext}" in argv
     assert "--test-type" in argv
     assert argv[-1].endswith("/register?browser_id=swarm-1")
+
+
+def test_spawn_register_url_includes_nonce(monkeypatch, tmp_path):
+    monkeypatch.setattr(spawn_manager, "find_cached_binary", lambda: "/fake/cft")
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    argv = sp._build_argv(str(tmp_path / "p1"), "swarm-1", "nonce-123")
+    assert argv[-1].endswith("/register?browser_id=swarm-1&nonce=nonce-123")
 
 
 def test_chrome_bin_explicit_skips_finder(tmp_path):

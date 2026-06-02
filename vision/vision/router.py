@@ -130,17 +130,23 @@ def _parse_json(text: str) -> Optional[dict[str, Any]]:
 
 _PASSWORD_LIKE = re.compile(r"\b(?:password|passwd|pwd)\s*[:=]\s*\S+", re.IGNORECASE)
 _SECRET_LABEL_VALUE = re.compile(
-    r"\b(password|passcode|pin|otp|cvv)\b\s*[:=]?\s*(\S+)", re.IGNORECASE
+    r"\b(password|passcode|pin|otp|totp|mfa|2fa|cvv|token|api[_-]?key|secret)\b\s*[:=]?\s*(\S+)",
+    re.IGNORECASE,
+)
+_PASSWORD_WORD_VALUE = re.compile(
+    r"\b(password|passcode|pin|otp|totp|mfa|2fa|cvv)\b\s+(\S+)",
+    re.IGNORECASE,
 )
 
 
 def _mask_passwords(payload: dict[str, Any]) -> dict[str, Any]:
     """Final-line-of-defense scrub of password-like patterns in textual fields."""
-    for key in ("reasoning", "selector_hint"):
+    for key in ("reasoning", "selector_hint", "text"):
         value = payload.get(key)
         if isinstance(value, str):
             value = _PASSWORD_LIKE.sub("password=[REDACTED]", value)
             value = _SECRET_LABEL_VALUE.sub(r"\1 [REDACTED]", value)
+            value = _PASSWORD_WORD_VALUE.sub(r"\1 [REDACTED]", value)
             payload[key] = value
     return payload
 

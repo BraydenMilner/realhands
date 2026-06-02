@@ -373,6 +373,38 @@ async def test_password_masking_in_response(tmp_path):
     assert "[REDACTED]" in decision.reasoning
 
 
+@pytest.mark.asyncio
+async def test_audit_redacts_task_url_and_decision_secrets(tmp_path):
+    config = _config(tmp_path)
+    payload = {
+        "action": "navigate",
+        "coordinates": None,
+        "selector_hint": "Open callback password hunter2",
+        "text": "https://example.com/callback?access_token=abc123#refresh_token=def456",
+        "confidence": 0.9,
+        "reasoning": "Use token=rawsecret from the page.",
+    }
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        await decide_action(
+            screenshot=_png_bytes(),
+            task_context="open https://app.test/welcome?code=secretcode and password hunter2",
+            step_history=[],
+            page_url="https://app.test/login?magic=abcdef#session=xyz",
+            config=config,
+        )
+
+    row = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[0])
+    blob = json.dumps(row)
+    for secret in ("abc123", "def456", "rawsecret", "secretcode", "hunter2", "abcdef", "xyz"):
+        assert secret not in blob
+    assert "[REDACTED]" in blob
+
+
 # ---------------------------------------------------------------------------
 # 8. Audit row schema.
 # ---------------------------------------------------------------------------

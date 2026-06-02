@@ -104,7 +104,7 @@ SSE event (the question in `message`) and pauses until the human answers via
 - **Local-first.** Everything binds to `127.0.0.1`; nothing phones home. Your LLM key
   (if you use the vision tier) is the only outbound dependency, and it's yours.
 - **Optional local auth.** `REALHANDS_BRIDGE_TOKEN` adds a REST header check and a
-  WebSocket handshake token for shared or remote environments. The default remains
+  first-message WebSocket token for shared or remote environments. The default remains
   localhost-only without auth for compatibility, with a startup warning.
 - **Fail loud.** Connection loss, repeated failures, and guard trips are surfaced, not
   swallowed.

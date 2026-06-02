@@ -117,6 +117,15 @@ async function postJSON(path, body) {
   return res.json();
 }
 
+async function getJSON(path) {
+  const res = await fetch(`${config.httpBase}${path}`, {
+    method: "GET",
+    headers: bridgeHeaders(),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 // ---------- chat rendering ----------
 
 function scrollToBottom() {
@@ -249,9 +258,11 @@ function setRunActive(active) {
 // /agent/reply instead of starting a new run, and the loop resumes.
 
 let pendingReplyRunId = null;
+let pendingReplyAwaitId = null;
 
 function enterReplyMode(evt) {
   pendingReplyRunId = evt.run_id;
+  pendingReplyAwaitId = evt.await_id || null;
   els.taskInput.disabled = false;
   els.sendBtn.disabled = false;
   els.sendBtn.textContent = "Answer";
@@ -262,6 +273,7 @@ function enterReplyMode(evt) {
 function exitReplyMode() {
   if (!pendingReplyRunId) return;
   pendingReplyRunId = null;
+  pendingReplyAwaitId = null;
   els.sendBtn.textContent = "Send";
   els.taskInput.placeholder = "Describe a task for the agent…";
   // If the run is still going, re-lock the composer until it finishes (or asks
@@ -276,12 +288,15 @@ async function sendReply() {
   const text = els.taskInput.value.trim();
   if (!text || !pendingReplyRunId) return;
   const runId = pendingReplyRunId;
+  const awaitId = pendingReplyAwaitId;
   addUserBubble(text);
   els.taskInput.value = "";
   autoSizeTextarea();
   exitReplyMode(); // run continues; re-lock the composer
   try {
-    const res = await postJSON("/agent/reply", { run_id: runId, text });
+    const body = { run_id: runId, text };
+    if (awaitId) body.await_id = awaitId;
+    const res = await postJSON("/agent/reply", body);
     // The bridge returns HTTP 200 {ok:false} when the run is gone or not
     // awaiting input — surface it instead of silently dropping the answer.
     if (!res || res.ok === false) {
@@ -352,9 +367,11 @@ async function stopRun() {
 // ---------- approval (ask mode) ----------
 
 let pendingApprovalRunId = null;
+let pendingApprovalAwaitId = null;
 
 function showApproval(evt) {
   pendingApprovalRunId = evt.run_id;
+  pendingApprovalAwaitId = evt.await_id || null;
   const bits = [evt.action, evt.reasoning].filter(Boolean).join(" — ");
   els.approvalDetail.textContent = bits || "Proposed action";
   els.approvalDetail.title = bits || "";
@@ -363,16 +380,20 @@ function showApproval(evt) {
 
 function hideApproval() {
   pendingApprovalRunId = null;
+  pendingApprovalAwaitId = null;
   els.approvalBar.classList.add("hidden");
 }
 
 async function respondApproval(approved) {
   if (!pendingApprovalRunId) return;
   const runId = pendingApprovalRunId;
+  const awaitId = pendingApprovalAwaitId;
   els.approveBtn.disabled = true;
   els.rejectBtn.disabled = true;
   try {
-    const res = await postJSON("/agent/approve", { run_id: runId, approved });
+    const body = { run_id: runId, approved };
+    if (awaitId) body.await_id = awaitId;
+    const res = await postJSON("/agent/approve", body);
     if (!res || res.ok === false) {
       addErrorBubble("That decision didn't land — the run may have ended.");
     } else {
@@ -405,33 +426,64 @@ function openEventStream() {
   }
 
   setConnection("connecting");
-  let source;
+  const controller = new AbortController();
+  evtSource = { close: () => controller.abort() };
+
+  (async () => {
+    try {
+      try {
+        await getJSON("/health");
+      } catch {
+        /* continue to stream attempt; errors there drive reconnect state */
+      }
+      const headers = {};
+      if (config.token) headers["X-RealHands-Token"] = config.token;
+      const res = await fetch(`${config.httpBase}/events`, {
+        method: "GET",
+        headers,
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      setConnection("connected");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let split;
+        while ((split = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          handleSseFrame(frame);
+        }
+      }
+      if (!controller.signal.aborted) throw new Error("event stream closed");
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      setConnection("disconnected");
+      setTimeout(() => {
+        if (evtSource && evtSource.close) openEventStream();
+      }, 1500);
+    }
+  })();
+}
+
+function handleSseFrame(frame) {
+  const dataLines = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+  }
+  if (!dataLines.length) return;
+  let evt;
   try {
-    source = new EventSource(`${config.httpBase}/events`);
-  } catch (err) {
-    setConnection("disconnected");
-    addErrorBubble(`Bridge not reachable at ${config.httpBase}: ${describeError(err)}`);
+    evt = JSON.parse(dataLines.join("\n"));
+  } catch {
     return;
   }
-  evtSource = source;
-
-  source.onopen = () => setConnection("connected");
-
-  source.onmessage = (e) => {
-    let evt;
-    try {
-      evt = JSON.parse(e.data);
-    } catch {
-      return; // ignore non-JSON / keep-alive frames
-    }
-    handleEvent(evt);
-  };
-
-  source.onerror = () => {
-    // EventSource auto-reconnects; reflect the gap in the pill. If the bridge is
-    // truly down it will sit in "connecting"/"disconnected".
-    setConnection(source.readyState === EventSource.CLOSED ? "disconnected" : "connecting");
-  };
+  handleEvent(evt);
 }
 
 function handleEvent(evt) {

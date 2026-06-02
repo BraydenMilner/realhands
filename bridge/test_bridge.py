@@ -65,8 +65,12 @@ def clean_registry():
     """Ensure the executor registry is empty before/after each test so a
     leaked connection from one test can't bleed into the next."""
     app.state.executors.clear()
+    app.state.spawn_nonces.clear()
+    app.state.executor_tokens.clear()
     yield
     app.state.executors.clear()
+    app.state.spawn_nonces.clear()
+    app.state.executor_tokens.clear()
 
 
 @pytest_asyncio.fixture
@@ -251,6 +255,13 @@ def test_ws_accepts_no_origin_when_unset():
             ws.send_text(json.dumps({"event": "executor_ready", "browser_id": "alpha"}))
 
 
+def test_ws_rejects_null_origin_when_unset():
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/", headers={"Origin": "null"}):
+                pass
+
+
 def test_ws_accepts_chrome_extension_origin():
     with TestClient(app) as client:
         with client.websocket_connect(
@@ -274,13 +285,82 @@ def test_ws_auth_token_required_when_set():
     os.environ["REALHANDS_BRIDGE_TOKEN"] = "secret"
     with TestClient(app) as client:
         with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect("/"):
-                pass
+            with client.websocket_connect("/") as ws:
+                ws.send_text(json.dumps({"event": "executor_ready", "browser_id": "alpha"}))
+                ws.receive_text()
+                ws.receive_text()
         with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect("/?token=nope"):
-                pass
-        with client.websocket_connect("/?token=secret") as ws:
-            ws.send_text(json.dumps({"event": "executor_ready", "browser_id": "alpha"}))
+            with client.websocket_connect("/") as ws:
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "event": "executor_ready",
+                            "browser_id": "alpha",
+                            "bridge_token": "nope",
+                        }
+                    )
+                )
+                ws.receive_text()
+                ws.receive_text()
+        with client.websocket_connect("/") as ws:
+            ws.send_text(
+                json.dumps(
+                    {
+                        "event": "executor_ready",
+                        "browser_id": "alpha",
+                        "bridge_token": "secret",
+                    }
+                )
+            )
+
+
+def test_ws_rejects_token_in_query_when_set():
+    os.environ["REALHANDS_BRIDGE_TOKEN"] = "secret"
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/?token=secret") as ws:
+                ws.send_text(json.dumps({"event": "executor_ready", "browser_id": "alpha"}))
+                ws.receive_text()
+                ws.receive_text()
+
+
+def test_spawned_ws_can_reconnect_with_executor_token_when_bridge_token_set():
+    os.environ["REALHANDS_BRIDGE_TOKEN"] = "secret"
+    nonce = "spawn-nonce"
+    app.state.spawn_nonces[nonce] = "alpha"
+    with TestClient(app) as client:
+        with client.websocket_connect("/") as ws:
+            ws.send_text(
+                json.dumps(
+                    {
+                        "event": "executor_ready",
+                        "browser_id": "alpha",
+                        "registration_nonce": nonce,
+                    }
+                )
+            )
+            msg = json.loads(ws.receive_text())
+            executor_token = msg["set_state"]["executor_token"]
+            assert msg["set_state"]["registration_nonce"] == ""
+            assert executor_token
+            assert nonce not in app.state.spawn_nonces
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/") as ws:
+            ws.send_text(
+                json.dumps(
+                    {
+                        "event": "executor_ready",
+                        "browser_id": "alpha",
+                        "executor_token": executor_token,
+                    }
+                )
+            )
+            for _ in range(60):
+                if "alpha" in app.state.executors:
+                    break
+                _time.sleep(0.05)
+            assert "alpha" in app.state.executors
 
 
 @pytest.mark.asyncio
@@ -465,6 +545,7 @@ async def test_register_returns_200_html(http_client):
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert "alpha" in r.text
+    assert "script-src" in r.headers["content-security-policy"]
 
 
 @pytest.mark.asyncio
@@ -472,6 +553,16 @@ async def test_register_no_id_defaults(http_client):
     r = await http_client.get("/register")
     assert r.status_code == 200
     assert "default" in r.text
+
+
+@pytest.mark.asyncio
+async def test_register_escapes_and_validates_browser_id(http_client):
+    r = await http_client.get("/register", params={"browser_id": "<script>alert(1)</script>"})
+    assert r.status_code == 400
+
+    ok = await http_client.get("/register", params={"browser_id": "alpha-1"})
+    assert ok.status_code == 200
+    assert "alpha-1" in ok.text
 
 
 # ---------- /events SSE ----------
@@ -698,7 +789,14 @@ class _MockSpawner:
         self.closed: list[str] = []
         self.spawn_exc: Exception | None = None
 
-    async def spawn(self, browser_id=None, profile=None, persistent=False, start_url=None):
+    async def spawn(
+        self,
+        browser_id=None,
+        profile=None,
+        persistent=False,
+        start_url=None,
+        registration_nonce=None,
+    ):
         if self.spawn_exc is not None:
             raise self.spawn_exc
         rec = {"browser_id": browser_id, "pid": 4242}
@@ -708,6 +806,7 @@ class _MockSpawner:
                 "profile": profile,
                 "persistent": persistent,
                 "start_url": start_url,
+                "registration_nonce": registration_nonce,
             }
         )
         return rec
@@ -754,6 +853,7 @@ async def test_spawn_calls_spawner(http_client, mock_spawner):
     assert mock_spawner.spawned[0]["browser_id"] == "alpha_1.test-2"
     assert mock_spawner.spawned[0]["profile"] == "acct_1.test-2"
     assert mock_spawner.spawned[0]["persistent"] is True
+    assert mock_spawner.spawned[0]["registration_nonce"]
 
 
 @pytest.mark.asyncio
