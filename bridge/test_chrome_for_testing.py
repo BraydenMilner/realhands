@@ -47,6 +47,35 @@ def test_pinned_version_constructs_exact_google_url(monkeypatch):
     assert url == "https://storage.googleapis.com/chrome-for-testing-public/1.2.3.4/linux64/chrome-linux64.zip"
 
 
+def test_default_release_is_pinned_with_sha256(monkeypatch):
+    monkeypatch.delenv("REALHANDS_CFT_VERSION", raising=False)
+    monkeypatch.delenv("REALHANDS_CFT_CHANNEL", raising=False)
+    version, url = cft._resolve_download("linux64")
+    assert version == "149.0.7827.54"
+    assert url == "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.54/linux64/chrome-linux64.zip"
+    assert cft._expected_sha256(version, "linux64") == (
+        "a77e3ba8fa8cf299a1a980313a162ea1a5d33297f632d5d3c7f553f7cf6780d4"
+    )
+    assert cft._expected_sha256(version, "mac-arm64") == (
+        "376b22526a92345db188f8750be8a5abc45d1c8dda3805bfe89bf3327a10062f"
+    )
+    assert cft._expected_sha256(version, "mac-x64") == (
+        "6f1e53ba52ae85dc5b6f1c60b169098b7dbabfc7ada5fffd17256c231825479b"
+    )
+    assert cft._expected_sha256(version, "win32") == (
+        "fda6f2cf7272830ecb6706e2124724c0d7313f35bea8d29452ba95cb33d7338e"
+    )
+    assert cft._expected_sha256(version, "win64") == (
+        "accd64b002d538cc7261f5bdb753c0d4b62ef78ea2a3c9d8dd8e65c9cdd9b9b4"
+    )
+
+
+def test_env_sha256_overrides_builtin_pin(monkeypatch):
+    override = "0" * 64
+    monkeypatch.setenv("REALHANDS_CFT_SHA256_LINUX64", override)
+    assert cft._expected_sha256("149.0.7827.54", "linux64") == override
+
+
 def test_invalid_version_rejected(monkeypatch):
     monkeypatch.setenv("REALHANDS_CFT_VERSION", "../../evil")
     with pytest.raises(cft.CftError):
@@ -54,6 +83,7 @@ def test_invalid_version_rejected(monkeypatch):
 
 
 def test_remote_url_host_is_allowlisted(monkeypatch):
+    monkeypatch.setenv("REALHANDS_CFT_CHANNEL", "Stable")
     payload = {
         "channels": {
             "Stable": {

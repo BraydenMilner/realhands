@@ -58,10 +58,10 @@ _CFT_VERSIONS_URL = (
 _DEFAULT_CACHE = Path.home() / ".cache" / "realhands" / "chrome-for-testing"
 
 # Pin a known-good version by default for deterministic swarms. Override with
-# REALHANDS_CFT_VERSION=<full version> or REALHANDS_CFT_CHANNEL=Stable to track
-# the latest. Empirically verified working on this version family.
+# REALHANDS_CFT_VERSION=<full version> or REALHANDS_CFT_CHANNEL=Stable/Beta/Dev/Canary
+# to track a channel instead.
 _PINNED_VERSION_ENV = "REALHANDS_CFT_VERSION"
-_CHANNEL_ENV = "REALHANDS_CFT_CHANNEL"  # Stable | Beta | Dev | Canary
+_CHANNEL_ENV = "REALHANDS_CFT_CHANNEL"  # Optional: Stable | Beta | Dev | Canary
 _CACHE_DIR_ENV = "REALHANDS_CFT_CACHE_DIR"
 _SHA256_ENV = "REALHANDS_CFT_SHA256"
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
@@ -69,6 +69,16 @@ _CHANNELS = frozenset({"Stable", "Beta", "Dev", "Canary"})
 _CFT_HOST = "storage.googleapis.com"
 _CFT_PATH_PREFIX = "/chrome-for-testing-public/"
 _MANIFEST_NAME = ".realhands-cft.json"
+_DEFAULT_PINNED_VERSION = "149.0.7827.54"
+_PINNED_SHA256 = {
+    _DEFAULT_PINNED_VERSION: {
+        "linux64": "a77e3ba8fa8cf299a1a980313a162ea1a5d33297f632d5d3c7f553f7cf6780d4",
+        "mac-arm64": "376b22526a92345db188f8750be8a5abc45d1c8dda3805bfe89bf3327a10062f",
+        "mac-x64": "6f1e53ba52ae85dc5b6f1c60b169098b7dbabfc7ada5fffd17256c231825479b",
+        "win32": "fda6f2cf7272830ecb6706e2124724c0d7313f35bea8d29452ba95cb33d7338e",
+        "win64": "accd64b002d538cc7261f5bdb753c0d4b62ef78ea2a3c9d8dd8e65c9cdd9b9b4",
+    }
+}
 
 
 class CftError(RuntimeError):
@@ -132,15 +142,20 @@ def _validate_download_url(url: str, *, version: str, platform_key: str) -> str:
 def _resolve_download(platform_key: str) -> tuple[str, str]:
     """Return (version, zip_url) for the desired CfT build.
 
-    Honors REALHANDS_CFT_VERSION (exact pin) else REALHANDS_CFT_CHANNEL
-    (default Stable) from the official versions-with-downloads JSON.
+    Honors REALHANDS_CFT_VERSION (exact pin), else REALHANDS_CFT_CHANNEL from
+    the official versions-with-downloads JSON, else the built-in pinned release.
     """
-    channel = os.environ.get(_CHANNEL_ENV, "Stable")
+    channel = os.environ.get(_CHANNEL_ENV)
     pinned = os.environ.get(_PINNED_VERSION_ENV)
 
     if pinned:
         version = _validate_version(pinned)
         return version, _construct_download_url(version, platform_key)
+
+    if not channel:
+        return _DEFAULT_PINNED_VERSION, _construct_download_url(
+            _DEFAULT_PINNED_VERSION, platform_key
+        )
 
     if channel not in _CHANNELS:
         raise CftError(f"unknown CfT channel {channel!r}")
@@ -161,15 +176,15 @@ def _resolve_download(platform_key: str) -> tuple[str, str]:
     raise CftError(f"no CfT chrome download for platform {platform_key!r}")
 
 
-def _expected_sha256(platform_key: str) -> Optional[str]:
+def _expected_sha256(version: str, platform_key: str) -> Optional[str]:
     platform_env = f"{_SHA256_ENV}_{platform_key.upper().replace('-', '_')}"
     expected = os.environ.get(platform_env) or os.environ.get(_SHA256_ENV)
-    if not expected:
-        return None
-    expected = expected.lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected):
-        raise CftError(f"invalid SHA-256 in {platform_env} / {_SHA256_ENV}")
-    return expected
+    if expected:
+        expected = expected.lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise CftError(f"invalid SHA-256 in {platform_env} / {_SHA256_ENV}")
+        return expected
+    return _PINNED_SHA256.get(version, {}).get(platform_key)
 
 
 def _sha256_file(path: Path) -> str:
@@ -349,7 +364,7 @@ def _download_and_extract(zip_url: str, dest_dir: Path, *, version: str, platfor
             zip_path,
             version=version,
             platform_key=platform_key,
-            expected_sha256=_expected_sha256(platform_key),
+            expected_sha256=_expected_sha256(version, platform_key),
         )
         extract_dir = tmp_dir / "extract"
         extract_dir.mkdir(mode=0o755)

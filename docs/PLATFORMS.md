@@ -45,13 +45,21 @@ launches it with `--load-extension=extension/` plus the register URL. Subsequent
 spawns reuse the cache. The download is lazy — it never blocks bridge startup and
 never happens in the single-browser path.
 
+The default release is pinned to CfT `149.0.7827.54` with built-in SHA-256 hashes
+for `linux64`, `mac-arm64`, `mac-x64`, `win32`, and `win64`. If you opt into a
+moving channel or a custom version, set `REALHANDS_CFT_SHA256` or the
+platform-specific `REALHANDS_CFT_SHA256_<PLATFORM>` value to keep SHA-256 pinning;
+otherwise RealHands falls back to the Google Cloud Storage object integrity header.
+
 **Optional knobs (all env vars — no admin):**
 
 | Variable | Effect |
 |---|---|
 | `CHROME_BIN` | Use an existing CfT/Chromium binary; skip the download |
-| `REALHANDS_CFT_CHANNEL` | `Stable` (default) / `Beta` / `Dev` / `Canary` |
+| `REALHANDS_CFT_CHANNEL` | Opt into a moving channel: `Stable` / `Beta` / `Dev` / `Canary` |
 | `REALHANDS_CFT_VERSION` | Pin an exact CfT version for deterministic swarms |
+| `REALHANDS_CFT_SHA256` | Expected zip SHA-256 for a custom pinned version |
+| `REALHANDS_CFT_SHA256_<PLATFORM>` | Per-platform zip SHA-256 override, e.g. `REALHANDS_CFT_SHA256_MAC_ARM64` |
 | `REALHANDS_CFT_CACHE_DIR` | Relocate the cache |
 
 Pre-warm (e.g. before an offline run): `python3 -m bridge.chrome_for_testing`
