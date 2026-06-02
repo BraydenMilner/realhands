@@ -46,10 +46,21 @@ screenshot, scroll, get page info, wait-for-url, and more. The full, authoritati
 API is served at `GET /openapi.json` (FastAPI auto-docs at `/docs`).
 
 **B) Bring your own key (turnkey).**
-Run the bundled vision loop (`examples/byo_key_agent.py`) with your own LLM key
-(OpenRouter / OpenAI / Anthropic / a local model). It screenshots, decides the next
-action, executes it through the bridge, and repeats — honoring the money guard the
-whole way.
+Run the bundled vision loop (`examples/byo_key_agent.py`) with **any model + your key** —
+one shot, no router to configure:
+```bash
+VISION_MODEL='gemini/gemini-2.5-flash' VISION_API_KEY='…' python3 examples/byo_key_agent.py "log in and open my profile"
+```
+`VISION_MODEL` is any [LiteLLM](https://docs.litellm.ai/docs/providers) id — `gemini/…`,
+`openrouter/…`, `anthropic/…`, or `openai/<name>` + `VISION_BASE_URL` for a local
+server (vLLM/Ollama). It screenshots → decides → acts → repeats (as fast as the model
+answers; reasoning models and streaming backends are handled), honoring the money guard.
+For a free 2-step setup or a cheap→fallback chain, pass multiple models — see
+`VisionConfig.models`.
+
+> **Model notes.** Capability and behavior vary by model — some are faster, some are
+> more capable, and some decline certain actions. Pick the one that fits your task;
+> RealHands just feeds it the screenshot and runs its decision.
 
 ## What a run looks like
 

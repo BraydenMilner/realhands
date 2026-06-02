@@ -31,7 +31,13 @@ import urllib.request
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "vision"))
 
-from vision import ActionDecision, StepHistoryItem, VisionConfig, decide_action  # noqa: E402
+from vision import (  # noqa: E402
+    ActionDecision,
+    ModelConfig,
+    StepHistoryItem,
+    VisionConfig,
+    decide_action,
+)
 
 # --- CONFIG (override via env) ---------------------------------------------
 BRIDGE = os.environ.get("BRIDGE_URL", "http://localhost:7878") + "/call"
@@ -39,12 +45,19 @@ BRIDGE_TOKEN = os.environ.get("REALHANDS_BRIDGE_TOKEN")
 BROWSER_ID = os.environ.get("BROWSER_ID")  # None -> the sole / default browser
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "25"))
 
+# Bring your own model. `VISION_MODEL` is any LiteLLM id:
+#   gemini/gemini-2.5-flash · openrouter/google/gemini-2.5-flash ·
+#   anthropic/claude-opus-4-... · openai/<name> (+ VISION_BASE_URL for local)
+# `VISION_API_KEY` is your key (or leave it and set the provider's env var).
+MODEL = os.environ.get("VISION_MODEL", "openai/qwen2.5-vl-7b-instruct")
 CONFIG = VisionConfig(
-    # Point this at your OpenAI-compatible endpoint + model. Defaults are local.
-    qwen_url=os.environ.get("VISION_MODEL_URL", "http://localhost:9001/v1"),
-    qwen_model=os.environ.get("VISION_MODEL", "qwen2.5-vl-7b-instruct"),
-    # Set to "1" to allow escalation to the cloud tiers (sends screenshots out).
-    allow_cloud_escalation=os.environ.get("ALLOW_CLOUD", "0") == "1",
+    models=[
+        ModelConfig(
+            model=MODEL,
+            api_key=os.environ.get("VISION_API_KEY"),
+            base_url=os.environ.get("VISION_BASE_URL", "http://localhost:9001/v1"),
+        )
+    ]
 )
 
 
@@ -90,7 +103,7 @@ def act(decision: ActionDecision, dpr: float = 1.0) -> str:
 
 async def run(task: str) -> None:
     history: list[StepHistoryItem] = []
-    print(f"task: {task!r}\nbridge: {BRIDGE}  model: {CONFIG.qwen_model}\n")
+    print(f"task: {task!r}\nbridge: {BRIDGE}  model: {MODEL}\n")
 
     for step in range(1, MAX_STEPS + 1):
         png, url, dpr = screenshot()
@@ -104,7 +117,7 @@ async def run(task: str) -> None:
         cost = f"${decision.cost_usd:.4f}" if decision.cost_usd else "$0"
         print(
             f"[{step:02d}] {decision.action:8s} conf={decision.confidence:.2f} "
-            f"tier={decision.tier_used}/{decision.model_used} "
+            f"{decision.model_used} "
             f"{decision.duration_ms}ms {cost} :: {decision.reasoning}"
         )
 

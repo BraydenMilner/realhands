@@ -14,7 +14,7 @@ from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from vision.audit import append_audit, now_iso, save_screenshot
-from vision.models import ActionDecision, StepHistoryItem, TierName, VisionConfig
+from vision.models import ActionDecision, StepHistoryItem, VisionConfig
 from vision.router import route
 
 
@@ -122,7 +122,6 @@ async def decide_action(
     task_context: str,
     step_history: list[StepHistoryItem],
     page_url: str,
-    model_tier: str = "local",
     config: Optional[VisionConfig] = None,
 ) -> ActionDecision:
     """Single entry point. See vision-service spec for the full contract.
@@ -155,7 +154,6 @@ async def decide_action(
             confidence=1.0,
             reasoning="money_action_requires_human",
             model_used="guardrail",
-            tier_used="local",
             cost_usd=0.0,
             duration_ms=int((time.monotonic() - start_wall) * 1000),
             escalations=[],
@@ -174,7 +172,7 @@ async def decide_action(
                 "task_context": _scrub_url(task_context),
                 "page_url": _scrub_url(page_url),
                 "history_len": len(step_history),
-                "entry_tier": model_tier,
+                "models": [m.model for m in config.models],
                 "guardrail_triggered": money_hit,
                 "decision": _redacted_decision_dump(decision),
             },
@@ -187,20 +185,12 @@ async def decide_action(
     # ---- step 3: persist screenshot ----------------------------------------
     digest, _ = save_screenshot(screenshot, config.resolved_screenshot_dir())
 
-    # ---- step 4: tier router -----------------------------------------------
-    # Coerce / validate entry tier. Anything we don't recognize starts at local.
-    entry_tier: TierName
-    if model_tier in ("local", "cheap", "frontier"):
-        entry_tier = model_tier  # type: ignore[assignment]
-    else:
-        entry_tier = "local"
-
+    # ---- step 4: model router (one-shot, or optional fallback chain) --------
     decision = await route(
         screenshot=screenshot,
         task_context=task_context,
         page_url=page_url,
         step_history=history,
-        entry_tier=entry_tier,
         config=config,
     )
 
@@ -213,7 +203,7 @@ async def decide_action(
             "task_context": _scrub_url(task_context),
             "page_url": _scrub_url(page_url),
             "history_len": len(history),
-            "entry_tier": entry_tier,
+            "models": [m.model for m in config.models],
             "guardrail_triggered": None,
             "decision": _redacted_decision_dump(decision),
         },

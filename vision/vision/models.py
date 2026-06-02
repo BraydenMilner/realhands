@@ -8,9 +8,6 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-# Tier names — three rungs only. Keep this in sync with router.TIER_ORDER.
-TierName = Literal["local", "cheap", "frontier"]
-
 ActionType = Literal["click", "type", "navigate", "wait", "done", "abort"]
 
 
@@ -20,10 +17,10 @@ class ActionDecision(BaseModel):
     Contract notes:
     - `coordinates` is (x, y) in screenshot pixels; only set for `click` / `type`.
     - `selector_hint` is a free-form description the executor can use to confirm
-      the click target (e.g. "Sign in button, bottom-center of login form"). Not
-      a CSS selector — extensions know nothing about specific sites.
+      the target (NOT a CSS selector).
     - `text` is set for `type` (what to type) and `navigate` (target URL).
-    - `escalations` records prior tier attempts so the audit log can replay the
+    - `model_index` is which configured model produced this (0 = the first/only).
+    - `escalations` records prior model attempts so the audit log can replay the
       whole decision chain.
     """
 
@@ -36,20 +33,15 @@ class ActionDecision(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str
     model_used: str
-    tier_used: TierName
+    model_index: int = 0
     cost_usd: Optional[float] = None
     duration_ms: int
     escalations: list[dict] = Field(default_factory=list)
 
 
 class StepHistoryItem(BaseModel):
-    """One prior step the executor took on this task.
-
-    Pass a list of these so the vision tier sees recent context. `decide_action`
-    truncates to the last 5 before prompting the model — keeps token budget
-    bounded and stops the model from anchoring on stale failures from 30 steps
-    ago.
-    """
+    """One prior step the executor took on this task. `decide_action` truncates
+    to the last 5 before prompting, keeping the token budget bounded."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -59,8 +51,38 @@ class StepHistoryItem(BaseModel):
     at: str
 
 
+class ModelConfig(BaseModel):
+    """One LLM endpoint — bring your own.
+
+    `model` is any LiteLLM model id, e.g.:
+      - "gemini/gemini-2.5-flash"                  (Gemini, key via GEMINI_API_KEY or api_key)
+      - "openrouter/google/gemini-2.5-flash"       (OpenRouter, key via OPENROUTER_API_KEY or api_key)
+      - "anthropic/claude-opus-4-..."              (Anthropic)
+      - "openai/<name>" + base_url                 (any OpenAI-compatible / local server, e.g. vLLM/Ollama)
+
+    LiteLLM routes each provider natively, so "connect a key" = set `model` +
+    `api_key`. If `api_key` is omitted, LiteLLM reads the provider's env var.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+def _default_models() -> list["ModelConfig"]:
+    """One-shot default: a local OpenAI-compatible vision server."""
+    return [
+        ModelConfig(
+            model="openai/qwen2.5-vl-7b-instruct",
+            base_url="http://localhost:9001/v1",
+            api_key="local",
+        )
+    ]
+
+
 def _default_audit_path() -> str:
-    """~/.local/share/realhands-vision/audit.jsonl — XDG-ish, no root needed."""
     return str(Path.home() / ".local" / "share" / "realhands-vision" / "audit.jsonl")
 
 
@@ -69,31 +91,24 @@ def _default_screenshot_dir() -> str:
 
 
 class VisionConfig(BaseModel):
-    """Knobs for the vision service. Default values are safe local-first."""
+    """Knobs for the vision service. Bring your own model(s).
+
+    `models` are tried in order: ONE entry = one-shot (any model, your key). Add
+    more for an optional cheap→fallback chain — the next model is only called if
+    the previous returns `confidence` below `confidence_threshold`.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    # Local tier — OpenAI-compatible chat completions endpoint.
-    # NOTE: `local_model` is the exact string your local server expects.
-    # llama.cpp / vLLM / Ollama installs name models differently, so this is
-    # intentionally configurable.
-    qwen_url: str = "http://localhost:9001/v1"
-    qwen_model: str = "qwen2.5-vl-7b-instruct"
-
-    # Cloud tiers — exact model IDs.
-    cheap_model: str = "claude-haiku-4-5-20251001"
-    frontier_model: str = "claude-opus-4-7"
-
-    # Escalation rule: confidence < threshold -> bump to next tier.
+    models: list[ModelConfig] = Field(default_factory=_default_models)
     confidence_threshold: float = 0.7
 
-    # Audit / screenshot persistence. None -> use XDG-ish defaults above.
     audit_path: Optional[str] = None
     screenshot_dir: Optional[str] = None
 
     # Money-action guardrail — if task_context or page_url contains any of these
     # tokens (case-insensitive), short-circuit to action=done. The runtime NEVER
-    # clicks money-moving controls (redeem/deposit/withdraw/etc.); a human does.
+    # clicks money-moving controls; a human does.
     # CANONICAL MONEY TOKENS — keep this list in sync with the copies in
     # decide.py, prompts.py, and the extension's background.js.
     high_stakes_actions: set[str] = Field(
@@ -110,12 +125,6 @@ class VisionConfig(BaseModel):
             "payout",
         }
     )
-
-    # When False (default), a tier escalation that would ship a full screenshot
-    # to a cloud provider (cheap/frontier) is blocked: the router returns
-    # action="abort", reasoning="needs_review_cloud_disabled" instead of calling
-    # out. Local-tier behavior is unaffected.
-    allow_cloud_escalation: bool = False
 
     def resolved_audit_path(self) -> str:
         return self.audit_path or _default_audit_path()
