@@ -26,9 +26,10 @@ flag (which modern Chrome blocks on the default profile anyway).
 - **Any agent.** Drive it from *any* agent — Claude, GPT, a plain script, your own
   orchestrator — over a tiny local REST/WebSocket API. Or use the bundled
   bring-your-own-key loop.
-- **Swarm.** Spawn, drive, and close many browsers on demand, each addressed by a
-  `browser_id`. Auto-spawn works on Linux + macOS (Windows: implemented but
-  unverified); requires a one-time admin policy step. See
+- **Swarm (advanced, optional).** Spawn, drive, and close many browsers on demand,
+  each addressed by a `browser_id`. `POST /spawn` launches Chrome for Testing
+  (auto-downloaded once, **no admin, no policy**) with the extension loaded; your
+  agent controls them all through the same API. Most users never need this — see
   [docs/PLATFORMS.md](docs/PLATFORMS.md).
 - **Safe by default.** A built-in guard **refuses** clicks/keys on money-moving
   controls (deposit / withdraw / transfer / cashout / cashier / …) by default;

@@ -51,6 +51,19 @@ _CHROME_FLAGS = (
     "--no-default-browser-check",
 )
 
+# The unpacked extension dir, force-loaded into every spawned browser.
+_EXTENSION_DIR = Path(__file__).resolve().parent.parent / "extension"
+
+# Chrome for Testing resolver: /spawn launches CfT (not branded Chrome) because
+# branded Chrome 137+ silently ignores --load-extension, so a spawned profile
+# would never receive the extension. CfT keeps the flag working — no admin, no
+# managed policy, no "Managed by your organization" banner.
+try:
+    from chrome_for_testing import ensure_chrome_for_testing, find_cached_binary
+except ImportError:  # keep spawn_manager importable even if the resolver is absent
+    ensure_chrome_for_testing = None  # type: ignore[assignment]
+    find_cached_binary = None  # type: ignore[assignment]
+
 _EPHEMERAL_PREFIX = "realhands-swarm-"
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
@@ -186,10 +199,13 @@ class SwarmSpawner:
         display: str = ":10",
         xauthority: Optional[str] = None,
     ) -> None:
-        if chrome_bin is not None:
-            self.chrome_bin = chrome_bin
-        else:
-            self.chrome_bin = _find_chrome_binary()
+        # Explicit override (CHROME_BIN / constructor) wins and may point at any
+        # --load-extension-capable binary (Chrome for Testing, Chromium). When
+        # unset, the launch binary resolves LAZILY on first spawn to a cached or
+        # downloaded Chrome for Testing — so bridge startup never blocks on a
+        # download, and branded Chrome's dead --load-extension is never used.
+        self.chrome_bin = chrome_bin
+        self._cft_bin: Optional[str] = None
         self.profiles_dir = Path(profiles_dir) if profiles_dir else _default_profiles_dir()
         self.bridge_port = int(bridge_port)
         self.display = display
@@ -204,12 +220,38 @@ class SwarmSpawner:
             f"?browser_id={browser_id}"
         )
 
+    def _resolve_launch_binary(self) -> str:
+        """Binary used for /spawn. An explicit override wins; otherwise a cached
+        or freshly-downloaded Chrome for Testing (branded Chrome can't
+        --load-extension, so it is never used here)."""
+        if self.chrome_bin:
+            return self.chrome_bin
+        if self._cft_bin:
+            return self._cft_bin
+        if find_cached_binary is None or ensure_chrome_for_testing is None:
+            raise RuntimeError(
+                "chrome_for_testing resolver unavailable; set CHROME_BIN to a "
+                "Chrome for Testing or Chromium binary that supports --load-extension"
+            )
+        self._cft_bin = find_cached_binary() or ensure_chrome_for_testing()
+        return self._cft_bin
+
     def _build_argv(self, user_data_dir: str, browser_id: str) -> list[str]:
         argv = [
-            self.chrome_bin,
+            self._resolve_launch_binary(),
             f"--user-data-dir={user_data_dir}",
         ]
         argv.extend(_CHROME_FLAGS)
+        # Force-load the unpacked extension into the fresh profile. Verified on
+        # Chrome for Testing 149: loads+enables the extension, and the register
+        # tab opens so the service worker self-identifies by browser_id.
+        argv.extend(
+            (
+                f"--load-extension={_EXTENSION_DIR}",
+                f"--disable-extensions-except={_EXTENSION_DIR}",
+                "--test-type",
+            )
+        )
         argv.append(self._register_url(browser_id))
         return argv
 

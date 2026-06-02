@@ -109,11 +109,10 @@ self-registers via `/register?browser_id=...`. This is cross-platform:
 - **Process management** uses `start_new_session` + `killpg` on POSIX and
   `CREATE_NEW_PROCESS_GROUP` + `taskkill /F /T /PID` on Windows.
 
-**Extension provisioning** is the cross-platform gap: modern Chrome blocks
-`--load-extension` on fresh profiles, so the `/spawn` flow requires a managed-policy
-`ExtensionInstallForcelist` installed once with admin/sudo. The `policy_setup.py`
-CLI handles this per OS. Linux and macOS are supported; Windows is implemented but
-unverified. See [docs/PLATFORMS.md](PLATFORMS.md) for details.
-
-A no-admin fallback exists: load the unpacked extension manually in Developer mode
-and use a persistent profile (single or manual multi-browser).
+**Extension provisioning.** Branded Chrome 137+ silently ignores
+`--load-extension` on fresh profiles, so `/spawn` launches **Chrome for Testing**
+(Google's automation build, where the flag still works) with
+`--load-extension=extension/`. CfT is auto-downloaded + cached once on first spawn
+— no admin, no managed policy, no prompts. The single-browser path doesn't use any
+of this: you load the unpacked extension into your own Chrome (Developer mode) and
+drive it directly. See [docs/PLATFORMS.md](PLATFORMS.md).

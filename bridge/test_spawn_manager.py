@@ -580,12 +580,26 @@ async def test_close_uses_taskkill_on_windows(monkeypatch, fake_popen, tmp_path)
     assert "888" in taskkill_recorder.calls[0] or "4242" in taskkill_recorder.calls[0]
 
 
-def test_chrome_bin_none_uses_finder(monkeypatch, tmp_path):
-    monkeypatch.setattr(spawn_manager, "_current_os", lambda: "Linux")
-    monkeypatch.setattr(spawn_manager.shutil, "which", lambda n: "/usr/bin/google-chrome" if n == "google-chrome" else None)
-
+def test_spawn_resolves_chrome_for_testing(monkeypatch, tmp_path):
+    # /spawn launches Chrome for Testing (branded Chrome can't --load-extension).
+    # chrome_bin unset -> NOT resolved at construction (no download on startup);
+    # resolved lazily to a (mocked) cached CfT binary on first use.
+    monkeypatch.setattr(spawn_manager, "find_cached_binary", lambda: "/fake/cft")
     sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
-    assert sp.chrome_bin == "/usr/bin/google-chrome"
+    assert sp.chrome_bin is None
+    assert sp._resolve_launch_binary() == "/fake/cft"
+
+
+def test_spawn_argv_force_loads_extension(monkeypatch, tmp_path):
+    monkeypatch.setattr(spawn_manager, "find_cached_binary", lambda: "/fake/cft")
+    sp = SwarmSpawner(profiles_dir=str(tmp_path / "profiles"))
+    argv = sp._build_argv(str(tmp_path / "p1"), "swarm-1")
+    ext = str(spawn_manager._EXTENSION_DIR)
+    assert argv[0] == "/fake/cft"
+    assert f"--load-extension={ext}" in argv
+    assert f"--disable-extensions-except={ext}" in argv
+    assert "--test-type" in argv
+    assert argv[-1].endswith("/register?browser_id=swarm-1")
 
 
 def test_chrome_bin_explicit_skips_finder(tmp_path):
@@ -594,3 +608,4 @@ def test_chrome_bin_explicit_skips_finder(tmp_path):
         profiles_dir=str(tmp_path / "profiles"),
     )
     assert sp.chrome_bin == "/custom/chrome"
+    assert sp._resolve_launch_binary() == "/custom/chrome"  # override wins over CfT

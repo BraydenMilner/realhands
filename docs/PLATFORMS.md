@@ -2,115 +2,73 @@
 
 ## What works where
 
-| Feature | Linux | macOS | Windows |
+| Capability | Linux | macOS | Windows |
 |---|---|---|---|
-| Multiplex driving (`/call`, `/sequence`, `/close` by `browser_id`) | Yes | Yes | Yes |
-| Manual extension loading (Developer mode) | Yes | Yes | Yes |
-| One-call `/spawn` auto-swarm | Yes | Yes | Implemented, unverified |
-| Policy setup CLI (`policy_setup.py`) | Yes | Yes | Implemented, unverified |
+| Single browser: load the extension + drive your real Chrome | ✅ | ✅ | ✅ |
+| Multiplex driving (`/call`, `/sequence`, `/close` by `browser_id`) | ✅ | ✅ | ✅ |
+| One-call `/spawn` auto-swarm | ✅ | ✅ (verified) | ✅ (same mechanism — confirm on a real Windows box) |
 
-Multiplex driving works everywhere today — it is pure Python (FastAPI + WebSocket
-routing keyed by `browser_id`) with no platform-specific code.
+The **core** experience — load the extension into your own Chrome and drive it —
+works everywhere with no admin and no extra downloads. The **swarm** is an
+optional, advanced feature.
 
-## Auto-spawn (`POST /spawn`)
+## The core (no admin, no download)
 
-The `/spawn` endpoint launches a fresh Chrome profile that self-registers with the
-bridge. This requires:
+1. Load the unpacked extension once: `chrome://extensions` → Developer mode →
+   **Load unpacked** → the `extension/` folder.
+2. Run the bridge: double-click `start-mac.command` / `start-windows.bat`, or
+   `cd bridge && uvicorn bridge:app --host 127.0.0.1 --port 7878`.
+3. Hand your agent [`AGENTS.md`](../AGENTS.md) and drive your real, logged-in
+   Chrome through the local API. That's it.
 
-1. **Chrome installed** on the machine. The bridge auto-detects the binary per OS,
-   or you can set `CHROME_BIN` to the full path.
-2. **The RealHands extension force-installed via Chrome managed policy.** Modern
-   Chrome ignores `--load-extension` on fresh profiles; a managed-policy
-   `ExtensionInstallForcelist` is the only reliable way to get the extension into
-   every new profile automatically. This policy must be installed **once** with
-   admin/sudo privileges.
+## Advanced: the swarm (`POST /spawn`)
 
-### One-time policy setup
+`/spawn` launches a *fresh* browser that already has the extension and
+self-registers with the bridge under its `browser_id`, so one agent can run many
+browsers at once (address each by `browser_id` in `/call`; close with
+`POST /browsers/<id>/close`).
 
-```bash
-# Linux / macOS (requires sudo)
-sudo python3 bridge/policy_setup.py install --extension-id <YOUR_EXTENSION_ID> --yes
+**Why Chrome for Testing.** Branded Google Chrome 137+ **silently ignores**
+`--load-extension`, so a freshly-spawned profile would never receive the
+extension. The old workaround — a Chrome managed policy
+(`ExtensionInstallForcelist`) — needs admin, shows a "Managed by your
+organization" banner, can't be installed silently on modern macOS, and is
+**blocked entirely on unmanaged consumer Windows machines**. So RealHands instead
+uses **Chrome for Testing** (CfT): Google's official, versioned automation build
+where `--load-extension` still works. It's a plain unzip — **no admin, no policy,
+no prompts** — and it's the only mechanism that is `works=yes / admin=no` on both
+macOS and Windows.
 
-# Check status
-python3 bridge/policy_setup.py status
+**How it works.** On the first `/spawn`, the bridge downloads + caches CfT
+(~150 MB, once) under `~/.cache/realhands/chrome-for-testing/<version>/`, then
+launches it with `--load-extension=extension/` plus the register URL. Subsequent
+spawns reuse the cache. The download is lazy — it never blocks bridge startup and
+never happens in the single-browser path.
 
-# Remove later
-sudo python3 bridge/policy_setup.py remove --yes
-```
+**Optional knobs (all env vars — no admin):**
 
-The `<YOUR_EXTENSION_ID>` comes from `chrome://extensions` in Developer mode with
-the unpacked extension loaded. You also need a packed `.crx` file — see below.
+| Variable | Effect |
+|---|---|
+| `CHROME_BIN` | Use an existing CfT/Chromium binary; skip the download |
+| `REALHANDS_CFT_CHANNEL` | `Stable` (default) / `Beta` / `Dev` / `Canary` |
+| `REALHANDS_CFT_VERSION` | Pin an exact CfT version for deterministic swarms |
+| `REALHANDS_CFT_CACHE_DIR` | Relocate the cache |
 
-#### Packing the extension
+Pre-warm (e.g. before an offline run): `python3 -m bridge.chrome_for_testing`
+downloads CfT and prints the cached binary path.
 
-```bash
-# From the repo root (produces realhands.crx + realhands.pem)
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --pack-extension=extension/ --pack-extension-key=realhands.pem
-# On Linux:
-google-chrome --pack-extension=extension/ --pack-extension-key=realhands.pem
-```
+**Notes.**
+- CfT profiles are clean (no existing logins) — expected for a swarm, where each
+  browser logs in per-instance. The single-browser path still drives your real,
+  logged-in Chrome.
+- macOS `/spawn` is verified end-to-end. Windows uses the identical mechanism
+  (CfT `win64` + `--load-extension`) and should be confirmed on a real Windows box
+  before being marked verified.
+- The retired `policy_setup.py` (managed-policy force-install) is no longer used.
 
-If you don't have a `.pem` key yet, omit `--pack-extension-key` on the first run
-to generate one. Keep the `.pem` private.
+## Chrome detection (single-browser / manual)
 
-### How the policy works per OS
-
-**Linux:**
-- Writes `/etc/opt/chrome/policies/managed/realhands.json` with
-  `ExtensionInstallForcelist` and `ExtensionInstallSources` pointing at a local
-  `file://` update XML.
-- Requires `sudo`.
-
-**macOS:**
-- Writes managed preferences to `/Library/Managed Preferences/com.google.Chrome.plist`
-  via `defaults write`, plus a fallback JSON policy to `/etc/chrome/policies/managed/realhands.json`.
-- Requires `sudo`.
-- The launcher (Chrome detection, env, process management) is verified on macOS. The
-  managed-policy force-install itself follows Chrome's documented mechanism but has not
-  yet been confirmed end-to-end on a real Mac (macOS managed preferences can require a
-  `cfprefsd` refresh before Chrome picks them up).
-
-**Windows (UNVERIFIED):**
-- Writes registry keys under
-  `HKLM\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist` and
-  `ExtensionInstallSources`.
-- Requires an elevated (Administrator) terminal.
-- The registry paths and values follow Chrome's policy documentation but have **not
-  been tested on a real Windows machine**.
-
-### Chrome binary detection
-
-The bridge searches for Chrome in this order:
-
-1. `CHROME_BIN` environment variable (if set, used directly).
-2. Platform-specific search:
-   - **Linux:** `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser` (via `$PATH`).
-   - **macOS:** `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
-   - **Windows:** `chrome.exe` under `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LocalAppData%\Google\Chrome\Application`.
-3. If nothing is found, a clear error is raised.
-
-### DISPLAY / X11
-
-- **Linux:** `DISPLAY` and `XAUTHORITY` are passed to the Chrome subprocess (default
-  `:10` and `~/.Xauthority`, configurable via env).
-- **macOS / Windows:** These variables are **not** set — the real desktop is used.
-
-### Process management
-
-- **Linux / macOS:** Chrome is launched with `start_new_session=True`; on close,
-  `os.killpg(SIGTERM)` kills the entire process group.
-- **Windows:** Chrome is launched with `CREATE_NEW_PROCESS_GROUP`; on close,
-  `taskkill /F /T /PID` kills the entire process tree.
-
-## No-admin fallback
-
-If you cannot or do not want to run the policy setup with admin/sudo:
-
-1. Load the unpacked extension in Chrome Developer mode (`chrome://extensions`).
-2. Use a **persistent profile** (your real Chrome profile or a named profile).
-3. Drive it manually via `/call` and `/sequence`.
-
-This works on all platforms but requires manual setup for each browser and does not
-support the one-call `/spawn` auto-swarm flow (since the extension won't be in a
-fresh profile).
+For the core path you load the extension into whatever Chrome you already use.
+If a branded Chrome binary is needed, the bridge searches `CHROME_BIN`, then
+per-OS defaults (Linux `$PATH`: `google-chrome`/`chromium`; macOS
+`/Applications/Google Chrome.app`; Windows `%ProgramFiles%`/`%LocalAppData%`).
