@@ -99,3 +99,26 @@ Every call takes an optional `"browser_id"`. With one browser, omit it. To run
 several browsers at once, `POST /spawn { "browser_id": "b1" }` launches another
 one; then address it with `"browser_id": "b1"` in `/call`. Close with
 `POST /browsers/b1/close`. See `docs/PLATFORMS.md`.
+
+## Chat / Ask mode (read-only Q&A)
+
+RealHands has two interaction modes:
+
+- **Do** — drive the browser (the default; uses `/agent/run`).
+- **Ask** — answer questions about the current page or the web, **read-only**
+  (no clicks, typing, navigation, or scrolling). The agent reads the page text,
+  views a screenshot, and optionally searches the web, then answers in the chat.
+
+```
+POST http://localhost:7878/agent/ask
+{ "message": "What does this page say?", "browser_id": "b1" }
+→ { "ok": true }
+```
+
+The answer streams over the existing `GET /events` SSE as `{type:"chat", ...}` events:
+- `{type:"chat", role:"tool", text, done:false}` — tool-use progress (read page, search).
+- `{type:"chat", role:"assistant", text, done:true}` — the final answer.
+- `{type:"chat", role:"error", text, done:true}` — on failure.
+
+**Web search** (optional): set `REALHANDS_SEARCH_API_KEY` to a [Tavily](https://tavily.com) API key.
+When unset, the agent answers from page content + its own knowledge only.

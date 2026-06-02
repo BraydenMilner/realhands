@@ -32,6 +32,9 @@ const els = {
   approveBtn: document.getElementById("approve-btn"),
   rejectBtn: document.getElementById("reject-btn"),
   modeSelect: document.getElementById("mode-select"),
+  autonomyToggle: document.getElementById("autonomy-toggle"),
+  modeDoBtn: document.getElementById("mode-do-btn"),
+  modeAskBtn: document.getElementById("mode-ask-btn"),
   stopBtn: document.getElementById("stop-btn"),
   micBtn: document.getElementById("mic-btn"),
   taskInput: document.getElementById("task-input"),
@@ -54,6 +57,7 @@ let totalCost = 0;
 let stepCount = 0;
 let modelName = "";
 let evtSource = null;
+let interactionMode = "do"; // "do" or "ask"
 
 // ---------- config loading ----------
 
@@ -85,9 +89,30 @@ chrome.storage.local.get("realhands_state").then(({ realhands_state }) => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !changes.realhands_state) return;
   applyState(changes.realhands_state.newValue);
-  // Reconnect the SSE stream against the (possibly) new base.
   openEventStream();
 });
+
+// ---------- interaction mode (Do / Ask) ----------
+
+function setInteractionMode(mode) {
+  interactionMode = mode;
+  if (mode === "ask") {
+    els.modeDoBtn.classList.remove("toggle-active");
+    els.modeAskBtn.classList.add("toggle-active");
+    els.autonomyToggle.classList.add("hidden");
+    els.stopBtn.classList.add("hidden");
+    els.taskInput.placeholder = els.taskInput.dataset.placeholderAsk || "Ask a question about this page…";
+  } else {
+    els.modeDoBtn.classList.add("toggle-active");
+    els.modeAskBtn.classList.remove("toggle-active");
+    els.autonomyToggle.classList.remove("hidden");
+    els.stopBtn.classList.remove("hidden");
+    els.taskInput.placeholder = els.taskInput.dataset.placeholderDo || "Describe a task for the agent…";
+  }
+}
+
+els.modeDoBtn.addEventListener("click", () => setInteractionMode("do"));
+els.modeAskBtn.addEventListener("click", () => setInteractionMode("ask"));
 
 // ---------- fetch helper ----------
 
@@ -310,7 +335,26 @@ async function sendReply() {
 // agent is waiting on an answer.
 function onSend() {
   if (pendingReplyRunId) sendReply();
+  else if (interactionMode === "ask") sendAsk();
   else sendTask();
+}
+
+async function sendAsk() {
+  const message = els.taskInput.value.trim();
+  if (!message) return;
+  addUserBubble(message);
+  els.taskInput.value = "";
+  autoSizeTextarea();
+  try {
+    const body = { message };
+    if (config.browserId) body.browser_id = config.browserId;
+    const data = await postJSON("/agent/ask", body);
+    if (!data || !data.ok) {
+      addErrorBubble("Bridge rejected the question.");
+    }
+  } catch (err) {
+    addErrorBubble(`Could not ask: ${describeError(err)}`);
+  }
 }
 
 async function sendTask() {
@@ -486,8 +530,34 @@ function handleSseFrame(frame) {
   handleEvent(evt);
 }
 
+function handleChatEvent(evt) {
+  const role = evt.role || "assistant";
+  if (role === "error") {
+    addErrorBubble(evt.text || "An error occurred.");
+  } else if (role === "tool") {
+    addBubble("system", (el) => {
+      el.textContent = evt.text || "Used a tool.";
+      el.style.opacity = "0.65";
+    });
+  } else if (evt.done) {
+    addBubble("agent", (el) => {
+      el.textContent = evt.text || "";
+    });
+  } else {
+    addBubble("system", (el) => {
+      el.textContent = evt.text || "";
+      el.style.opacity = "0.65";
+    });
+  }
+}
+
 function handleEvent(evt) {
-  if (!evt || evt.type !== "agent") return;
+  if (!evt) return;
+  if (evt.type === "chat") {
+    handleChatEvent(evt);
+    return;
+  }
+  if (evt.type !== "agent") return;
   // Only render events for the run we launched from this panel.
   // Drop any run-tagged event that isn't this panel's current run — INCLUDING
   // when we have no current run yet (currentRunId null). Otherwise a stray

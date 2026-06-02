@@ -48,7 +48,9 @@ flag (which modern Chrome blocks on the default profile anyway).
    a task. It drives your real, logged-in Chrome while you watch — and **asks
    before each action** by default. If it's missing a detail or hits a decision
    you didn't spell out (which account, what time), it **asks you right in the
-   chat** and waits for your answer.
+   chat** and waits for your answer. Switch to **Ask** mode to get answers about
+   the current page (read-only — no clicks or navigation) or search the web
+   without driving the browser.
 
 Prefer a terminal? The same bring-your-own-key loop runs as a one-liner — any
 model + your key, no router to configure:

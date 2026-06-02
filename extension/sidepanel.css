@@ -226,6 +226,14 @@ h1 {
   display: none;
 }
 
+.autonomy-toggle.hidden {
+  display: none;
+}
+
+.btn-stop.hidden {
+  display: none;
+}
+
 .approval-text {
   display: flex;
   flex-direction: column;
@@ -412,4 +420,35 @@ button:disabled {
 
 .btn-reject:hover:not(:disabled) {
   background: #fbe1e1;
+}
+
+.interaction-toggle {
+  display: inline-flex;
+  border: 1px solid #d0d5db;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.toggle-btn {
+  border: none;
+  border-radius: 0;
+  background: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+  color: #5f6368;
+}
+
+.toggle-btn:not(:last-child) {
+  border-right: 1px solid #d0d5db;
+}
+
+.toggle-btn.toggle-active {
+  background: #4c8bf5;
+  color: #fff;
+}
+
+.toggle-btn:hover:not(.toggle-active) {
+  background: #f2f4f7;
 }

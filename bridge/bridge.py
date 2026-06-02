@@ -153,6 +153,11 @@ class AgentRunBody(BaseModel):
     mode: Literal["ask", "gated", "auto"] = "gated"
 
 
+class AgentAskBody(BaseModel):
+    message: str
+    browser_id: Optional[str] = None
+
+
 class AgentStopBody(BaseModel):
     run_id: Optional[str] = None  # omitted -> stop all runs.
 
@@ -723,6 +728,28 @@ async def agent_reply(body: AgentReplyBody) -> JSONResponse:
     is fed back into the loop's step history and the run resumes."""
     runner: AgentRunner = app.state.agent_runner
     return JSONResponse(runner.reply(body.run_id, body.text, body.await_id))
+
+
+@app.post("/agent/ask")
+async def agent_ask(body: AgentAskBody) -> JSONResponse:
+    """Start a read-only chat turn. The answer streams over /events as
+    {type:"chat", ...} events. Returns {ok:true} immediately."""
+    from chat_runner import run_chat_turn
+
+    try:
+        executor = _resolve_executor(body.browser_id)
+    except _ResolveError:
+        executor = None
+
+    asyncio.create_task(
+        run_chat_turn(
+            message=body.message,
+            broker=app.state.broker,
+            executor=executor,
+            browser_id=body.browser_id,
+        )
+    )
+    return JSONResponse({"ok": True})
 
 
 @app.post("/credentials/read")

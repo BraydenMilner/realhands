@@ -48,7 +48,11 @@
 
     <footer class="composer">
       <div class="composer-controls">
-        <label class="mode-toggle">
+        <div class="interaction-toggle">
+          <button id="mode-do-btn" type="button" class="toggle-btn toggle-active">Do</button>
+          <button id="mode-ask-btn" type="button" class="toggle-btn">Ask</button>
+        </div>
+        <label class="mode-toggle" id="autonomy-toggle">
           <select id="mode-select" class="mode-select">
             <option value="gated" selected>Gated (approve sensitive)</option>
             <option value="ask">Ask before acting</option>
@@ -65,6 +69,8 @@
           id="task-input"
           rows="1"
           placeholder="Describe a task for the agent…"
+          data-placeholder-do="Describe a task for the agent…"
+          data-placeholder-ask="Ask a question about this page…"
           spellcheck="false"
         ></textarea>
         <button id="send-btn" type="button" class="btn-send">Send</button>

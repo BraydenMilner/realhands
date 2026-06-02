@@ -317,6 +317,7 @@ const BG_HANDLERS = {
 const CONTENT_METHODS = new Set([
   "wait_for_element",
   "get_page_info",
+  "get_page_text",
   "get_element_box",
   "scroll",
   "scroll_to",

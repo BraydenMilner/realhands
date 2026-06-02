@@ -138,6 +138,11 @@
       return { x: window.scrollX, y: window.scrollY };
     },
 
+    async get_page_text() {
+      const text = (document.body.innerText || "").slice(0, 20000);
+      return { text, title: document.title, url: location.href };
+    },
+
     async scroll_to({ selector, behavior = "auto", block = "center", inline = "nearest" }) {
       if (!selector) throw makeError("invalid_params", "scroll_to requires selector");
       const el = document.querySelector(selector);
