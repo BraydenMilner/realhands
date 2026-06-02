@@ -43,6 +43,19 @@ _PNG_1x1 = base64.b64encode(
 ).decode()
 
 
+def _make_png_b64(w: int, h: int) -> str:
+    """Return a base64-encoded minimal (w x h) white PNG using Pillow."""
+    from PIL import Image
+    from io import BytesIO
+    im = Image.new("RGB", (w, h), (255, 255, 255))
+    buf = BytesIO()
+    im.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+_PNG_100x100 = _make_png_b64(100, 100)
+
+
 # ---------- a fake `vision` package, installed into sys.modules ----------
 #
 # We build it ONCE at import time so `from vision import ...` (inside
@@ -162,11 +175,12 @@ class _FakeExecutor:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
         self.ws = object()  # truthy; _resolve_executor only checks registry presence
+        self._png_b64 = _PNG_1x1
 
     async def call(self, method, params=None, *, timeout=30.0):
         self.calls.append((method, params or {}))
         if method == "screenshot":
-            return {"base64": _PNG_1x1, "url": "https://example.test/", "device_pixel_ratio": 2.0}
+            return {"base64": self._png_b64, "url": "https://example.test/", "device_pixel_ratio": 2.0}
         return {}
 
 
@@ -765,3 +779,84 @@ async def test_events_flow_over_real_sse():
 
     assert "start" in seen
     assert "decision" in seen
+
+
+@pytest.mark.asyncio
+async def test_zoom_emits_acted_and_no_executor_actuation(http_client):
+    """A zoom decision publishes phase:acted action:zoom with 'zoomed into region'
+    and does NOT trigger any executor actuation (only screenshot calls)."""
+    ex = _FakeExecutor()
+    ex._png_b64 = _PNG_100x100
+    app.state.executors["default"] = ex
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="zoom", coordinates=(50, 50)),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "zoom test", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        events = await col.wait_for(run_id, {"acted", "done"})
+
+    zoom_events = [e for e in events if e.get("phase") == "acted" and e.get("action") == "zoom"]
+    assert zoom_events
+    assert zoom_events[0]["message"].startswith("zoomed into region")
+    assert any(e["phase"] == "done" for e in events)
+    assert all(m == "screenshot" for (m, _p) in ex.calls)
+
+
+@pytest.mark.asyncio
+async def test_zoom_with_none_coordinates_degrades_gracefully(http_client):
+    """A zoom with coordinates=None degrades to 'zoom unavailable; showing full page'
+    and does not crash."""
+    ex = _FakeExecutor()
+    ex._png_b64 = _PNG_100x100
+    app.state.executors["default"] = ex
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="zoom", coordinates=None),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "zoom none test", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        events = await col.wait_for(run_id, {"acted", "done"})
+
+    zoom_events = [e for e in events if e.get("phase") == "acted" and e.get("action") == "zoom"]
+    assert zoom_events
+    assert "zoom unavailable" in zoom_events[0]["message"]
+    assert any(e["phase"] == "done" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_zoom_then_click_remaps_coordinates(http_client):
+    """After a zoom, a subsequent click's coordinates are remapped through the view
+    back to screenshot space (larger than the display-space coords)."""
+    ex = _FakeExecutor()
+    ex._png_b64 = _PNG_100x100
+    app.state.executors["default"] = ex
+    _FAKE_VISION.decide_action = _script(
+        _FakeActionDecision(action="zoom", coordinates=(50, 50)),
+        _FakeActionDecision(action="click", coordinates=(10, 10)),
+        _FakeActionDecision(action="done"),
+    )
+
+    async with _EventCollector() as col:
+        r = await http_client.post(
+            "/agent/run", json={"task": "zoom then click", "mode": "auto", "max_steps": 5}
+        )
+        run_id = r.json()["run_id"]
+        events = await col.wait_for(run_id, {"done"})
+
+    clicks = [p for (m, p) in ex.calls if m == "click_at"]
+    assert clicks
+    cx, cy = clicks[0]["x"], clicks[0]["y"]
+    # Derivation (100x100 png, dpr=2.0): zoom at display (50,50) with no prior view
+    # -> crop box (10,10,90,90), scale = 100/80 = 1.25. Click at display (10,10) ->
+    # screenshot (10 + 10/1.25, 10 + 10/1.25) = (18,18) -> CSS /dpr = (9.0, 9.0).
+    # (Un-remapped would be display/dpr = (5,5), so this pins the offset+scale.)
+    assert (cx, cy) == (9.0, 9.0), f"remapped click coords were ({cx}, {cy}), expected (9.0, 9.0)"

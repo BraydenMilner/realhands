@@ -46,6 +46,10 @@ _EXEC_TIMEOUT = 30.0
 # How long a "wait" action sleeps (matches examples/byo_key_agent.py).
 _WAIT_SECONDS = 1.5
 
+_ZOOM_FRACTION = 0.34
+_MIN_CROP = 80
+_MAX_ZOOM_DEPTH = 3
+
 
 class VisionUnavailable(Exception):
     """Raised when the sibling vision package (or litellm) can't be imported.
@@ -261,6 +265,7 @@ class AgentRunner:
             return
 
         history: list = []
+        view = None
 
         for step in range(1, max_steps + 1):
             if stop_event.is_set():
@@ -286,11 +291,16 @@ class AgentRunner:
                 )
                 break
 
+            display_png = _apply_view(png, view)
+
             # ---- decide ----
             try:
+                effective_task = (
+                    task_text + "\n\n[The current screenshot is a ZOOMED-IN close-up of part of the page. Give coordinates within THIS image; they are mapped back to the full page.]"
+                ) if view else task_text
                 decision = await decide_action(
-                    screenshot=png,
-                    task_context=task_text,
+                    screenshot=display_png,
+                    task_context=effective_task,
                     step_history=history,
                     page_url=url,
                     config=config,
@@ -362,6 +372,25 @@ class AgentRunner:
                 )
                 continue
 
+            if action == "zoom":
+                new_view = None
+                if decision.coordinates is not None:
+                    new_view = _zoom_view(png, decision.coordinates[0], decision.coordinates[1], view)
+                if new_view is None:
+                    view = None
+                    await self._publish(run_id=run_id, step=step, phase="acted",
+                                        action="zoom", message="zoom unavailable; showing full page")
+                    history.append(StepHistoryItem(action="zoom", target=decision.selector_hint,
+                                                   outcome="zoom unavailable; full page", at=time.strftime("%H:%M:%S")))
+                    continue
+                view = new_view
+                await self._publish(run_id=run_id, step=step, phase="acted", action="zoom",
+                                    message=f"zoomed into region {new_view['box']}")
+                history.append(StepHistoryItem(action="zoom", target=decision.selector_hint,
+                                               outcome="zoomed in; next screenshot is a close-up of that region",
+                                               at=time.strftime("%H:%M:%S")))
+                continue
+
             # ---- ask-gate before any actuating action ----
             if mode == "ask" and action in _ACTUATING:
                 rec["awaiting"] = "approval"  # set BEFORE publishing
@@ -379,6 +408,10 @@ class AgentRunner:
                     break
 
             # ---- act ----
+            if view and action in ("click", "type", "scroll"):
+                decision.coordinates = _remap_from_view(action, decision.coordinates, view)
+            if action in ("navigate", "click", "type", "scroll"):
+                view = None
             try:
                 outcome = await self._execute(executor, decision, dpr, stop_event)
             except ExecutorError as exc:
@@ -522,3 +555,75 @@ def _css_coords(coordinates, dpr: float) -> tuple[float, float]:
     x, y = coordinates
     d = dpr or 1.0
     return x / d, y / d
+
+
+def _png_size(png: bytes):
+    """(width, height) of a PNG via Pillow; (0,0) if Pillow missing/bad bytes."""
+    try:
+        from PIL import Image
+        from io import BytesIO
+        with Image.open(BytesIO(png)) as im:
+            return im.size
+    except Exception:  # noqa: BLE001
+        return (0, 0)
+
+
+def _apply_view(png: bytes, view) -> bytes:
+    """Crop `png` to view['box'] and enlarge by view['scale']. Returns the original
+    bytes unchanged if view is None or Pillow is unavailable."""
+    if not view:
+        return png
+    try:
+        from PIL import Image
+        from io import BytesIO
+        x0, y0, x1, y1 = view["box"]
+        s = view["scale"]
+        with Image.open(BytesIO(png)) as im:
+            crop = im.convert("RGB").crop((x0, y0, x1, y1))
+            w = max(1, round((x1 - x0) * s))
+            h = max(1, round((y1 - y0) * s))
+            disp = crop.resize((w, h))
+            out = BytesIO()
+            disp.save(out, format="PNG")
+            return out.getvalue()
+    except Exception:  # noqa: BLE001
+        return png
+
+
+def _zoom_view(png: bytes, cx: float, cy: float, cur_view):
+    """Compute the NEW view dict for a zoom centered at display point (cx, cy).
+    Returns None if Pillow can't read the image or the depth cap is reached."""
+    W, H = _png_size(png)
+    if W == 0 or H == 0:
+        return None
+    depth = (cur_view or {}).get("depth", 0) + 1
+    if depth > _MAX_ZOOM_DEPTH:
+        return None
+    if cur_view:
+        bx0, by0, bx1, by1 = cur_view["box"]
+        s = cur_view["scale"]
+        scx = bx0 + cx / s
+        scy = by0 + cy / s
+        cur_w, cur_h = (bx1 - bx0), (by1 - by0)
+    else:
+        scx, scy = cx, cy
+        cur_w, cur_h = W, H
+    nw = max(_MIN_CROP, round(cur_w * _ZOOM_FRACTION))
+    nh = max(_MIN_CROP, round(cur_h * _ZOOM_FRACTION))
+    nw = min(nw, W); nh = min(nh, H)
+    nx0 = min(max(round(scx - nw / 2), 0), W - nw)
+    ny0 = min(max(round(scy - nh / 2), 0), H - nh)
+    return {"box": (nx0, ny0, nx0 + nw, ny0 + nh), "scale": W / nw, "depth": depth}
+
+
+def _remap_from_view(action: str, coordinates, view):
+    """Map display-space coordinates back to SCREENSHOT space. For point actions
+    (click/type) apply offset+scale; for scroll (a delta) apply scale only."""
+    if not view or coordinates is None:
+        return coordinates
+    x0, y0, x1, y1 = view["box"]
+    s = view["scale"]
+    dx, dy = coordinates
+    if action == "scroll":
+        return (dx / s, dy / s)
+    return (x0 + dx / s, y0 + dy / s)

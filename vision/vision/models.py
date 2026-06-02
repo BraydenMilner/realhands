@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 ActionType = Literal[
-    "click", "type", "navigate", "scroll", "wait", "ask_user", "done", "abort"
+    "click", "type", "navigate", "scroll", "wait", "ask_user", "zoom", "done", "abort"
 ]
 
 
@@ -19,7 +19,8 @@ class ActionDecision(BaseModel):
     Contract notes:
     - `coordinates` is (x, y) in screenshot pixels. Set for `click` / `type`
       (the target point) and for `scroll` (the [dx, dy] delta to scroll, where
-      positive dy scrolls DOWN).
+      positive dy scrolls DOWN). For `zoom`, `coordinates` is the [cx, cy]
+      point (in the shown image) to inspect closer.
     - `selector_hint` is a free-form description the executor can use to confirm
       the target (NOT a CSS selector).
     - `text` is set for `type` (what to type), `navigate` (target URL), and

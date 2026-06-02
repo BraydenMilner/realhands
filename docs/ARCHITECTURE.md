@@ -76,16 +76,18 @@ extension(s):
 
 For the bring-your-own-key mode, `decide_action()` takes a screenshot + task context
 + recent step history and returns a single structured `ActionDecision`. The actions
-are `click` / `type` / `navigate` / `scroll` / `wait` / `ask_user` / `done` / `abort`
+are `click` / `type` / `navigate` / `scroll` / `wait` / `ask_user` / `zoom` / `done` / `abort`
 (with coordinates where relevant, a confidence, and short reasoning). `scroll` carries
-a `[dx, dy]` delta; `ask_user` carries a question for the human in `text`. It is built
+a `[dx, dy]` delta; `ask_user` carries a question for the human in `text`; `zoom` carries
+the `[cx, cy]` point to inspect closer — the next screenshot is a cropped and enlarged
+close-up of that region so weak models can read small text or pinpoint small targets. It is built
 to route across tiers — a fast local (OpenAI-compatible) model first, escalating to a
 stronger hosted model only when confidence is low — and it applies the same money guard
 before returning.
 
 Confidence gates the **actuating** actions (`click`/`type`/`navigate`): a below-threshold
 decision escalates and ultimately aborts (`needs_review`). The **safe non-actuating**
-actions (`ask_user`/`scroll`/`wait`) are honored even below threshold — a weak model that
+actions (`ask_user`/`scroll`/`wait`/`zoom`) are honored even below threshold — a weak model that
 humbly says "I'm not sure, ask the human" at low confidence must not have its question
 thrown away. If you bring your own agent (mode A), you don't need this layer at all.
 

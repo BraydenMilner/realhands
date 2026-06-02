@@ -26,6 +26,7 @@ import os
 import sys
 import time
 import urllib.request
+from io import BytesIO
 
 # --- make the sibling `vision/` package importable -------------------------
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,6 +60,84 @@ CONFIG = VisionConfig(
         )
     ]
 )
+
+
+# --- zoom helpers (Tier 1) -------------------------------------------------
+# Crop+enlarge a region of the captured screenshot so a weak model can read
+# small text / pinpoint small targets. Pillow-based; degrade to a no-op if it
+# is missing. Mirrors bridge/agent_runner.py (the chat-panel loop).
+_ZOOM_FRACTION = 0.34
+_MIN_CROP = 80
+_MAX_ZOOM_DEPTH = 3
+
+
+def _png_size(png: bytes):
+    """(width, height) of a PNG via Pillow; (0,0) if Pillow missing/bad bytes."""
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(png)) as im:
+            return im.size
+    except Exception:  # noqa: BLE001
+        return (0, 0)
+
+
+def _apply_view(png: bytes, view) -> bytes:
+    """Crop `png` to view['box'] and enlarge by view['scale']. Returns the
+    original bytes if view is None or Pillow is unavailable."""
+    if not view:
+        return png
+    try:
+        from PIL import Image
+
+        x0, y0, x1, y1 = view["box"]
+        s = view["scale"]
+        with Image.open(BytesIO(png)) as im:
+            crop = im.convert("RGB").crop((x0, y0, x1, y1))
+            w = max(1, round((x1 - x0) * s))
+            h = max(1, round((y1 - y0) * s))
+            out = BytesIO()
+            crop.resize((w, h)).save(out, format="PNG")
+            return out.getvalue()
+    except Exception:  # noqa: BLE001
+        return png
+
+
+def _zoom_view(png: bytes, cx: float, cy: float, cur_view):
+    """New view dict for a zoom centered at display point (cx, cy). Returns None
+    if Pillow can't read the image or the depth cap is reached."""
+    W, H = _png_size(png)
+    if W == 0 or H == 0:
+        return None
+    depth = (cur_view or {}).get("depth", 0) + 1
+    if depth > _MAX_ZOOM_DEPTH:
+        return None
+    if cur_view:
+        bx0, by0, bx1, by1 = cur_view["box"]
+        s = cur_view["scale"]
+        scx, scy = bx0 + cx / s, by0 + cy / s
+        cur_w, cur_h = (bx1 - bx0), (by1 - by0)
+    else:
+        scx, scy = cx, cy
+        cur_w, cur_h = W, H
+    nw = min(max(_MIN_CROP, round(cur_w * _ZOOM_FRACTION)), W)
+    nh = min(max(_MIN_CROP, round(cur_h * _ZOOM_FRACTION)), H)
+    nx0 = min(max(round(scx - nw / 2), 0), W - nw)
+    ny0 = min(max(round(scy - nh / 2), 0), H - nh)
+    return {"box": (nx0, ny0, nx0 + nw, ny0 + nh), "scale": W / nw, "depth": depth}
+
+
+def _remap_from_view(action: str, coordinates, view):
+    """Map display-space coordinates back to SCREENSHOT space (offset+scale for
+    point actions; scale-only for scroll deltas)."""
+    if not view or coordinates is None:
+        return coordinates
+    x0, y0, x1, y1 = view["box"]
+    s = view["scale"]
+    dx, dy = coordinates
+    if action == "scroll":
+        return (dx / s, dy / s)
+    return (x0 + dx / s, y0 + dy / s)
 
 
 def call(method: str, params: dict | None = None, timeout: float = 30.0) -> dict:
@@ -117,13 +196,18 @@ def act(decision: ActionDecision, dpr: float = 1.0) -> str:
 
 async def run(task: str) -> None:
     history: list[StepHistoryItem] = []
+    view = None
     print(f"task: {task!r}\nbridge: {BRIDGE}  model: {MODEL}\n")
 
     for step in range(1, MAX_STEPS + 1):
         png, url, dpr = screenshot()
+        display_png = _apply_view(png, view)
+        effective_task = (
+            task + "\n\n[The current screenshot is a ZOOMED-IN close-up of part of the page. Give coordinates within THIS image; they are mapped back to the full page.]"
+        ) if view else task
         decision = await decide_action(
-            screenshot=png,
-            task_context=task,
+            screenshot=display_png,
+            task_context=effective_task,
             step_history=history,
             page_url=url,
             config=CONFIG,
@@ -138,6 +222,36 @@ async def run(task: str) -> None:
         if decision.action in ("done", "abort"):
             print(f"\nstopped: {decision.action} — {decision.reasoning}")
             return
+
+        if decision.action == "zoom":
+            new_view = None
+            if decision.coordinates is not None:
+                new_view = _zoom_view(png, decision.coordinates[0], decision.coordinates[1], view)
+            if new_view is None:
+                view = None
+                history.append(
+                    StepHistoryItem(
+                        action="zoom", target=decision.selector_hint,
+                        outcome="zoom unavailable; full page", at=time.strftime("%H:%M:%S"),
+                    )
+                )
+                print("  -> zoom unavailable; showing full page")
+                continue
+            view = new_view
+            history.append(
+                StepHistoryItem(
+                    action="zoom", target=decision.selector_hint,
+                    outcome="zoomed in; next screenshot is a close-up of that region",
+                    at=time.strftime("%H:%M:%S"),
+                )
+            )
+            print(f"  -> zoomed into region {new_view['box']}")
+            continue
+
+        if view and decision.action in ("click", "type", "scroll"):
+            decision.coordinates = _remap_from_view(decision.action, decision.coordinates, view)
+        if decision.action in ("navigate", "click", "type", "scroll"):
+            view = None
 
         outcome = act(decision, dpr)
         history.append(

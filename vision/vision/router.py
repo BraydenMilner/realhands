@@ -56,7 +56,7 @@ MONEY_TOKENS = frozenset(
 # not sure — ask the human" at 0.5 confidence gets its question thrown away and
 # the run aborts, which defeats the whole point of ask_user/scroll for weak models.
 # Actuating actions (click/type/navigate) stay gated by confidence_threshold.
-_ALWAYS_HONOR = frozenset({"ask_user", "scroll", "wait"})
+_ALWAYS_HONOR = frozenset({"ask_user", "scroll", "wait", "zoom"})
 
 
 def _contains_money_token(*values: Optional[str]) -> bool:

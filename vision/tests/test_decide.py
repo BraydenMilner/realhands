@@ -474,7 +474,7 @@ def test_action_type_includes_scroll_and_ask_user():
 
     from vision.models import ActionType
 
-    assert {"scroll", "ask_user"} <= set(get_args(ActionType))
+    assert {"scroll", "ask_user", "zoom"} <= set(get_args(ActionType))
 
 
 @pytest.mark.asyncio
@@ -606,3 +606,94 @@ async def test_scroll_negative_delta_passes_through(tmp_path):
         )
     assert decision.action == "scroll"
     assert decision.coordinates == (0, -600)
+
+
+# ---------------------------------------------------------------------------
+# 13. zoom action passes through with coordinates intact.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_zoom_passes_through(tmp_path):
+    config = _config(tmp_path)
+    payload = {
+        "action": "zoom",
+        "coordinates": [320, 240],
+        "selector_hint": "small button label",
+        "text": None,
+        "confidence": 0.8,
+        "reasoning": "button text too small to read; zooming in",
+    }
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="click the submit button",
+            step_history=[], page_url="https://example.com/form", config=config,
+        )
+
+    assert decision.action == "zoom"
+    assert decision.coordinates == (320, 240)
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_zoom_is_honored(tmp_path):
+    config = _config(tmp_path)
+    payload = {
+        "action": "zoom",
+        "coordinates": [100, 100],
+        "selector_hint": "tiny text",
+        "text": None,
+        "confidence": 0.3,
+        "reasoning": "unsure what this says; zoom to inspect",
+    }
+
+    async def fake_acompletion(model: str, **kwargs):
+        return _fake_response(payload)
+
+    with patch("vision.router.litellm.acompletion", side_effect=fake_acompletion), \
+         patch("vision.router.litellm.completion_cost", return_value=0.0):
+        decision = await decide_action(
+            screenshot=_png_bytes(), task_context="read the label",
+            step_history=[], page_url="https://example.com/x", config=config,
+        )
+
+    assert decision.action == "zoom"
+    assert decision.reasoning != "needs_review"
+
+
+# ---------------------------------------------------------------------------
+# 14. The bundled example loop (examples/byo_key_agent.py) must keep its zoom
+#     helpers DEFINED and matching the bridge's remap math. The example's loop
+#     is otherwise untested, so this guards against the helpers being dropped.
+# ---------------------------------------------------------------------------
+
+
+def test_byo_example_zoom_helpers_present_and_correct():
+    import importlib.util
+
+    example = ROOT.parent / "examples" / "byo_key_agent.py"
+    spec = importlib.util.spec_from_file_location("byo_key_agent", example)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+
+    for name in ("_png_size", "_apply_view", "_zoom_view", "_remap_from_view"):
+        assert hasattr(m, name), f"example is missing helper {name}"
+
+    from PIL import Image
+    from io import BytesIO
+
+    buf = BytesIO()
+    Image.new("RGB", (100, 100), (255, 255, 255)).save(buf, format="PNG")
+    png = buf.getvalue()
+
+    view = m._zoom_view(png, 50, 50, None)
+    assert view == {"box": (10, 10, 90, 90), "scale": 1.25, "depth": 1}
+    # Same remap the bridge proves in test_zoom_then_click_remaps_coordinates.
+    assert m._remap_from_view("click", (10, 10), view) == (18.0, 18.0)
+    assert m._remap_from_view("scroll", (10, 10), view) == (8.0, 8.0)
+    # Depth cap stops endless zoom.
+    assert m._zoom_view(png, 50, 50, {**view, "depth": 3}) is None

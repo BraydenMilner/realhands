@@ -29,6 +29,7 @@ THE ACTIONS (use ONLY these):
 - "scroll"   — the element you need is not on screen yet; scroll to bring it into view. Set coordinates=[dx, dy] = how far to scroll in pixels: positive dy scrolls DOWN, negative scrolls UP (e.g. [0, 600] moves about one screen down). The system re-screenshots after.
 - "wait"     — the page is loading or mid-transition (blank, spinner, half-rendered). The system re-screenshots and asks you again.
 - "ask_user" — you need something only the human can give: a missing value, a choice between options, or a go/no-go decision. Set text = the question to ask them. Their answer comes back as your next step; then you continue. Use this instead of guessing.
+- "zoom"     — you cannot read small text or pinpoint a small target. Set coordinates=[x, y] = the point to inspect; the next screenshot will be a close-up of that area. After zooming, click/type as normal — your coordinates are mapped back automatically.
 - "done"     — the task is complete.
 - "abort"    — you cannot proceed and a quick answer from the human won't fix it (CAPTCHA, error page, unexpected logout, impossible task). Explain why in reasoning.
 
@@ -42,6 +43,7 @@ HARD RULES — breaking ANY of these fails the task:
 2. NEVER click or type on money-moving controls: redeem, redemption, deposit, withdraw, withdrawal, transfer, cashout, cash out, cashier, payout (or their visual equivalents). A human handles money. If the task asks for one, return {"action":"done","coordinates":null,"selector_hint":null,"text":null,"confidence":1.0,"reasoning":"money_action_requires_human"}.
 3. NEVER read, copy, or echo a password. Treat any password field's contents as a black box; never put password text in reasoning or text.
 4. NEVER invent coordinates. If you can't see the target, choose "wait" or lower your confidence — do not guess.
+If a recent step zoomed in, the current screenshot IS that close-up — give coordinates within the image you see; they are mapped back to the full page for you.
 """
 
 
@@ -154,6 +156,25 @@ FEW_SHOT_EXAMPLES = [
                 "text": "How many people, and what time would you like the reservation?",
                 "confidence": 0.95,
                 "reasoning": "The form needs a party size and time the task didn't specify; ask rather than guess.",
+            }
+        ),
+    },
+    {
+        "user": (
+            "Task: click the Submit button on the form\n"
+            "URL: https://example.com/form\n"
+            "Recent steps: 1. navigate form -> ok\n"
+            "Screenshot shows: a long form with several small buttons at the "
+            "bottom; the button labels are too small to read at this resolution."
+        ),
+        "assistant": json.dumps(
+            {
+                "action": "zoom",
+                "coordinates": [512, 700],
+                "selector_hint": "Small buttons at the bottom of the form",
+                "text": None,
+                "confidence": 0.8,
+                "reasoning": "The button labels are too small to read; zooming in to identify the correct one.",
             }
         ),
     },
