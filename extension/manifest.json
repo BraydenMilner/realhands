@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RealHands",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Browser executor for the realhands Autonomous Agent Runtime. Receives commands from a local Agent Bridge over WebSocket and executes generic browser primitives. Knows nothing about any specific site.",
   "permissions": [
     "storage",
