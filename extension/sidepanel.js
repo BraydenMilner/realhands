@@ -156,11 +156,18 @@ function scrollToBottom() {
   els.messages.scrollTop = els.messages.scrollHeight;
 }
 
+function ensureHasBubbles() {
+  if (!els.messages.classList.contains("has-bubbles")) {
+    els.messages.classList.add("has-bubbles");
+  }
+}
+
 function addBubble(kind, build) {
   const div = document.createElement("div");
   div.className = `bubble bubble-${kind}`;
   build(div);
   els.messages.appendChild(div);
+  ensureHasBubbles();
   scrollToBottom();
   return div;
 }
@@ -455,7 +462,9 @@ async function respondApproval(approved) {
 // ---------- SSE event stream ----------
 
 function setConnection(stateName) {
-  els.connection.textContent = stateName;
+  const labelEl = els.connection.querySelector(".pill-label");
+  if (labelEl) labelEl.textContent = stateName;
+  else els.connection.textContent = stateName;
   els.connection.className = `pill pill-${stateName}`;
 }
 
@@ -636,8 +645,12 @@ function initSpeech() {
   };
 
   recognition.onerror = (e) => {
-    if (e.error && e.error !== "no-speech" && e.error !== "aborted") {
-      addSystemBubble(`Mic error: ${e.error}`);
+    if (
+      e.error === "not-allowed" ||
+      e.error === "service-not-allowed" ||
+      e.error === "NotAllowedError"
+    ) {
+      disableMic();
     }
   };
 
@@ -647,7 +660,13 @@ function initSpeech() {
   };
 }
 
-function toggleMic() {
+function disableMic() {
+  els.micBtn.disabled = true;
+  els.micBtn.classList.remove("recording");
+  els.micBtn.title = "Microphone blocked — allow mic access for the extension to use voice";
+}
+
+async function toggleMic() {
   if (!recognition) return;
   if (recognizing) {
     try {
@@ -655,11 +674,24 @@ function toggleMic() {
     } catch {
       /* ignore */
     }
-  } else {
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    for (const track of stream.getTracks()) track.stop();
     try {
       recognition.start();
     } catch {
       /* start() throws if already started; ignore */
+    }
+  } catch (err) {
+    const name = (err && err.name) || "";
+    if (
+      name === "NotAllowedError" ||
+      name === "NotFoundError" ||
+      name === "NotReadableError"
+    ) {
+      disableMic();
     }
   }
 }

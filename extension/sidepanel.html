@@ -8,10 +8,13 @@
   <body>
     <header>
       <div class="head-left">
-        <h1>realhands</h1>
+        <div class="logo-square">
+          <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M8 1a5 5 0 0 1 5 5v3a5 5 0 0 1-10 0V6a5 5 0 0 1 5-5zm0 1a4 4 0 0 0-4 4v3a4 4 0 0 0 8 0V6a4 4 0 0 0-4-4zm1 10H7v2h2v-2zm-1 1.5A3.5 3.5 0 0 1 4.5 10h1A2.5 2.5 0 0 0 8 12.5z"/></svg>
+        </div>
+        <h1>RealHands</h1>
         <span id="version" class="version"></span>
       </div>
-      <span id="connection-pill" class="pill pill-idle">idle</span>
+      <span id="connection-pill" class="pill pill-idle"><span class="pill-dot"></span><span class="pill-label">idle</span></span>
     </header>
 
     <section class="readout" id="readout">
@@ -33,7 +36,12 @@
       </div>
     </section>
 
-    <main id="messages" class="messages" aria-live="polite"></main>
+    <main id="messages" class="messages" aria-live="polite">
+      <div class="messages-empty">
+        <span class="messages-empty-icon">&#9995;</span>
+        <span>Describe a task and I'll do it — or switch to Ask to ask about this page.</span>
+      </div>
+    </main>
 
     <section id="approval-bar" class="approval-bar hidden">
       <div class="approval-text">
